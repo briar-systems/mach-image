@@ -1,0 +1,38 @@
+# image.format: identifiers for the image formats mach-image handles.
+
+use std.types.string.str;
+use std.types.string.str_equals;
+
+# format tags. FORMAT_UNKNOWN is the zero value for an unrecognized or
+# not-yet-detected format.
+pub val FORMAT_UNKNOWN: u8 = 0;
+pub val FORMAT_QOI:     u8 = 1;
+pub val FORMAT_TGA:     u8 = 2;
+pub val FORMAT_PNG:     u8 = 3;
+pub val FORMAT_JPEG:    u8 = 4;
+
+# format_name: the lowercase short name of a format tag, or "unknown".
+# ---
+# format: a FORMAT_* tag
+# ret:    the format's short name
+pub fun format_name(format: u8) str {
+    if (format == FORMAT_QOI)  { ret "qoi"; }
+    if (format == FORMAT_TGA)  { ret "tga"; }
+    if (format == FORMAT_PNG)  { ret "png"; }
+    if (format == FORMAT_JPEG) { ret "jpeg"; }
+    ret "unknown";
+}
+
+test "format: known names" {
+    if (!str_equals(format_name(FORMAT_QOI), "qoi"))   { ret 1; }
+    if (!str_equals(format_name(FORMAT_TGA), "tga"))   { ret 1; }
+    if (!str_equals(format_name(FORMAT_PNG), "png"))   { ret 1; }
+    if (!str_equals(format_name(FORMAT_JPEG), "jpeg")) { ret 1; }
+    ret 0;
+}
+
+test "format: unknown falls through" {
+    if (!str_equals(format_name(FORMAT_UNKNOWN), "unknown")) { ret 1; }
+    if (!str_equals(format_name(200), "unknown"))           { ret 1; }
+    ret 0;
+}
