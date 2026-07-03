@@ -7,8 +7,11 @@
 # decodes and encodes every op type and round-trips.
 
 use std.types.size.usize;
+use std.memory.raw_zero;
 use image.codec.Image;
 use image.codec.image_byte_len;
+use image.codec.COLORSPACE_SRGB;
+use image.codec.COLORSPACE_LINEAR;
 use image.codec.DecodeStatus;
 use image.codec.DECODE_OK;
 use image.codec.DECODE_TRUNCATED;
@@ -64,7 +67,7 @@ pub fun qoi_info(src: *u8, src_len: usize, out: *Image) DecodeStatus {
 
     if (width == 0 || height == 0)         { ret DECODE_BAD_HEADER; }
     if (channels != 3 && channels != 4)    { ret DECODE_BAD_HEADER; }
-    if (colorspace != 0 && colorspace != 1) { ret DECODE_BAD_HEADER; }
+    if (colorspace != COLORSPACE_SRGB && colorspace != COLORSPACE_LINEAR) { ret DECODE_BAD_HEADER; }
     if (image_byte_len(width, height) == 0) { ret DECODE_BAD_HEADER; }
 
     out.pixels     = nil;
@@ -100,8 +103,7 @@ pub fun qoi_decode(src: *u8, src_len: usize, dst: *u8, dst_len: usize, out: *Ima
     if (dst_len < need) { ret DECODE_SHORT_BUFFER; }
 
     var index: [256]u8;
-    var k: usize = 0;
-    for (k < 256) { index[k] = 0; k = k + 1; }
+    raw_zero(?index[0], 256);
 
     var r: u8 = 0;
     var g: u8 = 0;
@@ -215,7 +217,7 @@ pub fun qoi_encode_bound(width: u32, height: u32) usize {
 pub fun qoi_encode(img: *Image, dst: *u8, dst_len: usize) usize {
     if (img == nil || dst == nil || img.pixels == nil) { ret 0; }
     if (img.channels != 3 && img.channels != 4)        { ret 0; }
-    if (img.colorspace != 0 && img.colorspace != 1)    { ret 0; }
+    if (img.colorspace != COLORSPACE_SRGB && img.colorspace != COLORSPACE_LINEAR) { ret 0; }
 
     val bound: usize = qoi_encode_bound(img.width, img.height);
     if (bound == 0 || dst_len < bound) { ret 0; }
@@ -230,8 +232,7 @@ pub fun qoi_encode(img: *Image, dst: *u8, dst_len: usize) usize {
     dst[13] = img.colorspace;
 
     var index: [256]u8;
-    var k: usize = 0;
-    for (k < 256) { index[k] = 0; k = k + 1; }
+    raw_zero(?index[0], 256);
 
     var pr: u8 = 0;
     var pg: u8 = 0;
