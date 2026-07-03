@@ -9,9 +9,6 @@
 # uncompressed 32-bit top-left file, enough for tooling round-trips.
 
 use std.types.size.usize;
-use std.types.bool.bool;
-use std.types.bool.true;
-use std.types.bool.false;
 use image.codec.Image;
 use image.codec.image_byte_len;
 use image.codec.COLORSPACE_SRGB;
@@ -33,6 +30,139 @@ fun read_le16(p: *u8, off: usize) u16 {
 fun write_le16(p: *u8, off: usize, v: u16) {
     p[off]     = v::u8;
     p[off + 1] = (v >> 8)::u8;
+}
+
+# Bgra: one decoded truecolor pixel in RGBA order.
+rec Bgra {
+    r: u8;
+    g: u8;
+    b: u8;
+    a: u8;
+}
+
+# read_bgra: read one BGR(A) source pixel at @pos, storing it as RGBA in out and
+# advancing @pos by bpp. 24-bit pixels take a fully-opaque alpha.
+fun read_bgra(src: *u8, pos: *usize, src_len: usize, bpp: usize, out: *Bgra) DecodeStatus {
+    val p: usize = @pos;
+    if (p + bpp > src_len) { ret DECODE_TRUNCATED; }
+    out.b = src[p];
+    out.g = src[p + 1];
+    out.r = src[p + 2];
+    out.a = 255;
+    if (bpp == 4) { out.a = src[p + 3]; }
+    @pos = p + bpp;
+    ret DECODE_OK;
+}
+
+# flip_rows: reverse the row order of a width x height RGBA8 buffer in place.
+fun flip_rows(dst: *u8, width: usize, height: usize) {
+    val row_bytes: usize = width * 4;
+    var top: usize = 0;
+    var bot: usize = height - 1;
+    for (top < bot) {
+        val top_base: usize = top * row_bytes;
+        val bot_base: usize = bot * row_bytes;
+        var i: usize = 0;
+        for (i < row_bytes) {
+            val t: u8 = dst[top_base + i];
+            dst[top_base + i] = dst[bot_base + i];
+            dst[bot_base + i] = t;
+            i = i + 1;
+        }
+        top = top + 1;
+        bot = bot - 1;
+    }
+}
+
+# flip_cols: reverse each row of a width x height RGBA8 buffer in place.
+fun flip_cols(dst: *u8, width: usize, height: usize) {
+    val row_bytes: usize = width * 4;
+    var row: usize = 0;
+    for (row < height) {
+        val base: usize = row * row_bytes;
+        var left: usize = 0;
+        var right: usize = width - 1;
+        for (left < right) {
+            val lp: usize = base + left * 4;
+            val rp: usize = base + right * 4;
+            var c: usize = 0;
+            for (c < 4) {
+                val t: u8 = dst[lp + c];
+                dst[lp + c] = dst[rp + c];
+                dst[rp + c] = t;
+                c = c + 1;
+            }
+            left = left + 1;
+            right = right - 1;
+        }
+        row = row + 1;
+    }
+}
+
+# decode_raw: decode uncompressed truecolor pixels into dst in storage order.
+fun decode_raw(src: *u8, src_len: usize, data_start: usize, dst: *u8, px_count: usize, bpp: usize) DecodeStatus {
+    var pos: usize = data_start;
+    var di: usize = 0;
+    var i: usize = 0;
+    for (i < px_count) {
+        var px: Bgra;
+        val rs: DecodeStatus = read_bgra(src, ?pos, src_len, bpp, ?px);
+        if (rs != DECODE_OK) { ret rs; }
+        dst[di]     = px.r;
+        dst[di + 1] = px.g;
+        dst[di + 2] = px.b;
+        dst[di + 3] = px.a;
+        di = di + 4;
+        i = i + 1;
+    }
+    ret DECODE_OK;
+}
+
+# decode_rle: decode run-length-encoded truecolor pixels into dst in storage
+# order. repeat packets are bulk-filled; a run that would overrun the image is
+# clamped to the remaining pixels.
+fun decode_rle(src: *u8, src_len: usize, data_start: usize, dst: *u8, px_count: usize, bpp: usize) DecodeStatus {
+    var pos: usize = data_start;
+    var di: usize = 0;
+    var produced: usize = 0;
+    for (produced < px_count) {
+        if (pos >= src_len) { ret DECODE_TRUNCATED; }
+        val packet: u8 = src[pos];
+        pos = pos + 1;
+        var count: usize = (packet & 0x7F)::usize + 1;
+        if (count > px_count - produced) { count = px_count - produced; }
+
+        if ((packet & 0x80) != 0) {
+            var px: Bgra;
+            val rs: DecodeStatus = read_bgra(src, ?pos, src_len, bpp, ?px);
+            if (rs != DECODE_OK) { ret rs; }
+            var k: usize = 0;
+            for (k < count) {
+                dst[di]     = px.r;
+                dst[di + 1] = px.g;
+                dst[di + 2] = px.b;
+                dst[di + 3] = px.a;
+                di = di + 4;
+                k = k + 1;
+            }
+        }
+        or {
+            var k: usize = 0;
+            for (k < count) {
+                var px: Bgra;
+                val rs: DecodeStatus = read_bgra(src, ?pos, src_len, bpp, ?px);
+                if (rs != DECODE_OK) { ret rs; }
+                dst[di]     = px.r;
+                dst[di + 1] = px.g;
+                dst[di + 2] = px.b;
+                dst[di + 3] = px.a;
+                di = di + 4;
+                k = k + 1;
+            }
+        }
+        produced = produced + count;
+    }
+    ret DECODE_OK;
 }
 
 # tga_info: parse a TGA header into out (dimensions and metadata only).
@@ -111,85 +241,20 @@ pub fun tga_decode(src: *u8, src_len: usize, dst: *u8, dst_len: usize, out: *Ima
     val width:  usize = header.width::usize;
     val height: usize = header.height::usize;
     val px_count: usize = width * height;
+    val data_start: usize = TGA_HEADER_LEN + id_length;
 
-    var pos: usize = TGA_HEADER_LEN + id_length;
-
-    var run_remaining: usize = 0;
-    var run_is_rle: bool = false;
-    var run_r: u8 = 0;
-    var run_g: u8 = 0;
-    var run_b: u8 = 0;
-    var run_a: u8 = 255;
-
-    var produced: usize = 0;
-    for (produced < px_count) {
-        var r: u8 = 0;
-        var g: u8 = 0;
-        var b: u8 = 0;
-        var a: u8 = 255;
-
-        if (image_type == TGA_TYPE_TRUECOLOR_RLE) {
-            if (run_remaining == 0) {
-                if (pos >= src_len) { ret DECODE_TRUNCATED; }
-                val packet: u8 = src[pos];
-                pos = pos + 1;
-                run_remaining = (packet & 0x7F)::usize + 1;
-                if ((packet & 0x80) != 0) {
-                    run_is_rle = true;
-                    if (pos + bpp > src_len) { ret DECODE_TRUNCATED; }
-                    run_b = src[pos];
-                    run_g = src[pos + 1];
-                    run_r = src[pos + 2];
-                    run_a = 255;
-                    if (bpp == 4) { run_a = src[pos + 3]; }
-                    pos = pos + bpp;
-                }
-                or {
-                    run_is_rle = false;
-                }
-            }
-
-            if (run_is_rle) {
-                r = run_r;
-                g = run_g;
-                b = run_b;
-                a = run_a;
-            }
-            or {
-                if (pos + bpp > src_len) { ret DECODE_TRUNCATED; }
-                b = src[pos];
-                g = src[pos + 1];
-                r = src[pos + 2];
-                a = 255;
-                if (bpp == 4) { a = src[pos + 3]; }
-                pos = pos + bpp;
-            }
-            run_remaining = run_remaining - 1;
-        }
-        or {
-            if (pos + bpp > src_len) { ret DECODE_TRUNCATED; }
-            b = src[pos];
-            g = src[pos + 1];
-            r = src[pos + 2];
-            a = 255;
-            if (bpp == 4) { a = src[pos + 3]; }
-            pos = pos + bpp;
-        }
-
-        val sr: usize = produced / width;
-        val sc: usize = produced % width;
-        var dy: usize = height - 1 - sr;
-        if (top_to_bottom != 0) { dy = sr; }
-        var dx: usize = sc;
-        if (right_to_left != 0) { dx = width - 1 - sc; }
-
-        val di: usize = (dy * width + dx) * 4;
-        dst[di]     = r;
-        dst[di + 1] = g;
-        dst[di + 2] = b;
-        dst[di + 3] = a;
-        produced = produced + 1;
+    # decode into dst in storage order, then normalize origin with in-place flips.
+    var dst_st: DecodeStatus = DECODE_OK;
+    if (image_type == TGA_TYPE_TRUECOLOR_RLE) {
+        dst_st = decode_rle(src, src_len, data_start, dst, px_count, bpp);
     }
+    or {
+        dst_st = decode_raw(src, src_len, data_start, dst, px_count, bpp);
+    }
+    if (dst_st != DECODE_OK) { ret dst_st; }
+
+    if (top_to_bottom == 0) { flip_rows(dst, width, height); }
+    if (right_to_left != 0) { flip_cols(dst, width, height); }
 
     out.pixels     = dst;
     out.width      = header.width;
@@ -367,6 +432,21 @@ test "tga: decode rejects interleaved descriptor bits" {
     };
     var img: Image;
     if (tga_decode(?stream[0], 26, ?tga_pix[0], 4096, ?img) != DECODE_UNSUPPORTED) { ret 1; }
+    ret 0;
+}
+
+test "tga: decode right-to-left flips columns" {
+    # descriptor 0x30: top-to-bottom origin, right-to-left column order.
+    var stream: [26]u8 = [26]u8{
+        0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        2, 0, 1, 0, 32, 0x30,
+        30, 20, 10, 40,    # storage col 0 (rightmost) -> RGBA(10,20,30,40)
+        70, 60, 50, 80     # storage col 1 (leftmost)  -> RGBA(50,60,70,80)
+    };
+    var img: Image;
+    if (tga_decode(?stream[0], 26, ?tga_pix[0], 4096, ?img) != DECODE_OK) { ret 1; }
+    if (tga_pix[0] != 50 || tga_pix[1] != 60 || tga_pix[2] != 70 || tga_pix[3] != 80) { ret 1; }
+    if (tga_pix[4] != 10 || tga_pix[5] != 20 || tga_pix[6] != 30 || tga_pix[7] != 40) { ret 1; }
     ret 0;
 }
 
