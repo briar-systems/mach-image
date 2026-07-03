@@ -114,70 +114,72 @@ pub fun qoi_decode(src: *u8, src_len: usize, dst: *u8, dst_len: usize, out: *Ima
     var px:      usize = 0;
     var pos:     usize = QOI_HEADER_LEN;
     var out_pos: usize = 0;
-    var run:     usize = 0;
 
     for (px < px_count) {
-        if (run > 0) {
-            run = run - 1;
+        if (pos >= src_len) { ret DECODE_TRUNCATED; }
+        val op: u8 = src[pos];
+        pos = pos + 1;
+
+        # every op but RUN yields a single pixel; RUN repeats the current one.
+        var run_len: usize = 1;
+
+        if (op == QOI_OP_RGB) {
+            if (pos + 3 > src_len) { ret DECODE_TRUNCATED; }
+            r = src[pos];
+            g = src[pos + 1];
+            b = src[pos + 2];
+            pos = pos + 3;
+        }
+        or (op == QOI_OP_RGBA) {
+            if (pos + 4 > src_len) { ret DECODE_TRUNCATED; }
+            r = src[pos];
+            g = src[pos + 1];
+            b = src[pos + 2];
+            a = src[pos + 3];
+            pos = pos + 4;
+        }
+        or ((op & QOI_MASK_2) == QOI_OP_INDEX) {
+            val slot: usize = (op & 0x3F)::usize * 4;
+            r = index[slot];
+            g = index[slot + 1];
+            b = index[slot + 2];
+            a = index[slot + 3];
+        }
+        or ((op & QOI_MASK_2) == QOI_OP_DIFF) {
+            r = r + ((op >> 4) & 0x03) - 2;
+            g = g + ((op >> 2) & 0x03) - 2;
+            b = b + (op & 0x03) - 2;
+        }
+        or ((op & QOI_MASK_2) == QOI_OP_LUMA) {
+            if (pos >= src_len) { ret DECODE_TRUNCATED; }
+            val b2: u8 = src[pos];
+            pos = pos + 1;
+            val dg: u8 = (op & 0x3F) - 32;
+            g = g + dg;
+            r = r + dg - 8 + ((b2 >> 4) & 0x0F);
+            b = b + dg - 8 + (b2 & 0x0F);
         }
         or {
-            if (pos >= src_len) { ret DECODE_TRUNCATED; }
-            val op: u8 = src[pos];
-            pos = pos + 1;
-
-            if (op == QOI_OP_RGB) {
-                if (pos + 3 > src_len) { ret DECODE_TRUNCATED; }
-                r = src[pos];
-                g = src[pos + 1];
-                b = src[pos + 2];
-                pos = pos + 3;
-            }
-            or (op == QOI_OP_RGBA) {
-                if (pos + 4 > src_len) { ret DECODE_TRUNCATED; }
-                r = src[pos];
-                g = src[pos + 1];
-                b = src[pos + 2];
-                a = src[pos + 3];
-                pos = pos + 4;
-            }
-            or ((op & QOI_MASK_2) == QOI_OP_INDEX) {
-                val slot: usize = (op & 0x3F)::usize * 4;
-                r = index[slot];
-                g = index[slot + 1];
-                b = index[slot + 2];
-                a = index[slot + 3];
-            }
-            or ((op & QOI_MASK_2) == QOI_OP_DIFF) {
-                r = r + ((op >> 4) & 0x03) - 2;
-                g = g + ((op >> 2) & 0x03) - 2;
-                b = b + (op & 0x03) - 2;
-            }
-            or ((op & QOI_MASK_2) == QOI_OP_LUMA) {
-                if (pos >= src_len) { ret DECODE_TRUNCATED; }
-                val b2: u8 = src[pos];
-                pos = pos + 1;
-                val dg: u8 = (op & 0x3F) - 32;
-                g = g + dg;
-                r = r + dg - 8 + ((b2 >> 4) & 0x0F);
-                b = b + dg - 8 + (b2 & 0x0F);
-            }
-            or {
-                run = (op & 0x3F)::usize;
-            }
-
-            val slot: usize = hash_slot(r, g, b, a);
-            index[slot]     = r;
-            index[slot + 1] = g;
-            index[slot + 2] = b;
-            index[slot + 3] = a;
+            run_len = (op & 0x3F)::usize + 1;
+            if (run_len > px_count - px) { run_len = px_count - px; }
         }
 
-        dst[out_pos]     = r;
-        dst[out_pos + 1] = g;
-        dst[out_pos + 2] = b;
-        dst[out_pos + 3] = a;
-        out_pos = out_pos + 4;
-        px = px + 1;
+        val slot: usize = hash_slot(r, g, b, a);
+        index[slot]     = r;
+        index[slot + 1] = g;
+        index[slot + 2] = b;
+        index[slot + 3] = a;
+
+        var run: usize = 0;
+        for (run < run_len) {
+            dst[out_pos]     = r;
+            dst[out_pos + 1] = g;
+            dst[out_pos + 2] = b;
+            dst[out_pos + 3] = a;
+            out_pos = out_pos + 4;
+            run = run + 1;
+        }
+        px = px + run_len;
     }
 
     out.pixels     = dst;
