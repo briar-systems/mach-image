@@ -7,6 +7,7 @@ use std.types.string.str;
 use image.format;
 use image.codec;
 use image.qoi;
+use image.tga;
 # links the startup entrypoint so `mach test` over this library produces a binary.
 use std.runtime;
 
@@ -38,3 +39,8 @@ fwd qoi.qoi_info;
 fwd qoi.qoi_decode;
 fwd qoi.qoi_encode;
 fwd qoi.qoi_encode_bound;
+
+fwd tga.tga_info;
+fwd tga.tga_decode;
+fwd tga.tga_encode;
+fwd tga.tga_encode_bound;

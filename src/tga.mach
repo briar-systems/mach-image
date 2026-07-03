@@ -1,0 +1,389 @@
+# image.tga: the TGA (Truevision) codec — truecolor decoder and encoder.
+#
+# TGA has an 18-byte header with little-endian fields; pixels are stored in
+# BGRA order (BGR for 24-bit) and their scanline order is set by the image
+# descriptor. this module decodes the two common truecolor variants —
+# uncompressed (type 2) and run-length encoded (type 10), at 24 or 32 bits —
+# normalizing both origin orders to RGBA8, top-left. color-mapped and grayscale
+# images are recognized but reported as unsupported. the encoder emits a minimal
+# uncompressed 32-bit top-left file, enough for tooling round-trips.
+
+use std.types.size.usize;
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use image.codec.Image;
+use image.codec.image_byte_len;
+use image.codec.COLORSPACE_SRGB;
+use image.codec.DecodeStatus;
+use image.codec.DECODE_OK;
+use image.codec.DECODE_TRUNCATED;
+use image.codec.DECODE_BAD_HEADER;
+use image.codec.DECODE_SHORT_BUFFER;
+use image.codec.DECODE_UNSUPPORTED;
+
+val TGA_TYPE_TRUECOLOR:     u8 = 2;    # uncompressed truecolor
+val TGA_TYPE_TRUECOLOR_RLE: u8 = 10;   # run-length encoded truecolor
+val TGA_HEADER_LEN:         usize = 18;
+
+fun read_le16(p: *u8, off: usize) u16 {
+    ret p[off]::u16 | (p[off + 1]::u16 << 8);
+}
+
+fun write_le16(p: *u8, off: usize, v: u16) {
+    p[off]     = v::u8;
+    p[off + 1] = (v >> 8)::u8;
+}
+
+# tga_info: parse a TGA header into out (dimensions and metadata only).
+#
+# leaves out.pixels nil. rejects a truncated header, and reports the color-map,
+# grayscale, and non-24/32-bit variants this module does not decode as
+# DECODE_UNSUPPORTED. TGA carries no colorspace field, so sRGB is assumed.
+# ---
+# src:     pointer to the encoded TGA bytes
+# src_len: number of bytes available at src
+# out:     Image to populate with width/height/channels/colorspace
+# ret:     DECODE_OK, or a DECODE_* error
+pub fun tga_info(src: *u8, src_len: usize, out: *Image) DecodeStatus {
+    if (src == nil || out == nil)  { ret DECODE_BAD_HEADER; }
+    if (src_len < TGA_HEADER_LEN)  { ret DECODE_TRUNCATED; }
+
+    val color_map_type: u8  = src[1];
+    val image_type:     u8  = src[2];
+    val width:          u16 = read_le16(src, 12);
+    val height:         u16 = read_le16(src, 14);
+    val depth:          u8  = src[16];
+
+    if (color_map_type != 0)                                        { ret DECODE_UNSUPPORTED; }
+    if (image_type != TGA_TYPE_TRUECOLOR && image_type != TGA_TYPE_TRUECOLOR_RLE) { ret DECODE_UNSUPPORTED; }
+    if (depth != 24 && depth != 32)                                 { ret DECODE_UNSUPPORTED; }
+    if (width == 0 || height == 0)                                  { ret DECODE_BAD_HEADER; }
+    if (image_byte_len(width::u32, height::u32) == 0)               { ret DECODE_BAD_HEADER; }
+
+    var channels: u8 = 3;
+    if (depth == 32) { channels = 4; }
+
+    out.pixels     = nil;
+    out.width      = width::u32;
+    out.height     = height::u32;
+    out.channels   = channels;
+    out.colorspace = COLORSPACE_SRGB;
+    ret DECODE_OK;
+}
+
+# tga_decode: decode a truecolor TGA into the caller-supplied RGBA8 buffer.
+#
+# handles uncompressed (type 2) and RLE (type 10) truecolor at 24 or 32 bits,
+# normalizing both scanline orders to top-left RGBA8. dst must be at least
+# image_byte_len(width, height) bytes. every source read is bounds-checked; a
+# stream that ends early is rejected as DECODE_TRUNCATED.
+# ---
+# src:     pointer to the encoded TGA bytes
+# src_len: number of bytes available at src
+# dst:     destination RGBA8 buffer
+# dst_len: size of dst in bytes
+# out:     Image populated to describe the decoded pixels
+# ret:     DECODE_OK, or a DECODE_* error
+pub fun tga_decode(src: *u8, src_len: usize, dst: *u8, dst_len: usize, out: *Image) DecodeStatus {
+    var header: Image;
+    val st: DecodeStatus = tga_info(src, src_len, ?header);
+    if (st != DECODE_OK) { ret st; }
+    if (dst == nil)      { ret DECODE_SHORT_BUFFER; }
+
+    val need: usize = image_byte_len(header.width, header.height);
+    if (dst_len < need) { ret DECODE_SHORT_BUFFER; }
+
+    val id_length: usize = src[0]::usize;
+    val image_type: u8   = src[2];
+    val descriptor: u8   = src[17];
+    val bpp: usize       = src[16]::usize / 8;
+
+    val top_to_bottom: u8 = (descriptor >> 5) & 1;
+    val right_to_left: u8 = (descriptor >> 4) & 1;
+
+    val width:  usize = header.width::usize;
+    val height: usize = header.height::usize;
+    val px_count: usize = width * height;
+
+    var pos: usize = TGA_HEADER_LEN + id_length;
+
+    var run_remaining: usize = 0;
+    var run_is_rle: bool = false;
+    var run_r: u8 = 0;
+    var run_g: u8 = 0;
+    var run_b: u8 = 0;
+    var run_a: u8 = 255;
+
+    var produced: usize = 0;
+    for (produced < px_count) {
+        var r: u8 = 0;
+        var g: u8 = 0;
+        var b: u8 = 0;
+        var a: u8 = 255;
+
+        if (image_type == TGA_TYPE_TRUECOLOR_RLE) {
+            if (run_remaining == 0) {
+                if (pos >= src_len) { ret DECODE_TRUNCATED; }
+                val packet: u8 = src[pos];
+                pos = pos + 1;
+                run_remaining = (packet & 0x7F)::usize + 1;
+                if ((packet & 0x80) != 0) {
+                    run_is_rle = true;
+                    if (pos + bpp > src_len) { ret DECODE_TRUNCATED; }
+                    run_b = src[pos];
+                    run_g = src[pos + 1];
+                    run_r = src[pos + 2];
+                    run_a = 255;
+                    if (bpp == 4) { run_a = src[pos + 3]; }
+                    pos = pos + bpp;
+                }
+                or {
+                    run_is_rle = false;
+                }
+            }
+
+            if (run_is_rle) {
+                r = run_r;
+                g = run_g;
+                b = run_b;
+                a = run_a;
+            }
+            or {
+                if (pos + bpp > src_len) { ret DECODE_TRUNCATED; }
+                b = src[pos];
+                g = src[pos + 1];
+                r = src[pos + 2];
+                a = 255;
+                if (bpp == 4) { a = src[pos + 3]; }
+                pos = pos + bpp;
+            }
+            run_remaining = run_remaining - 1;
+        }
+        or {
+            if (pos + bpp > src_len) { ret DECODE_TRUNCATED; }
+            b = src[pos];
+            g = src[pos + 1];
+            r = src[pos + 2];
+            a = 255;
+            if (bpp == 4) { a = src[pos + 3]; }
+            pos = pos + bpp;
+        }
+
+        val sr: usize = produced / width;
+        val sc: usize = produced % width;
+        var dy: usize = height - 1 - sr;
+        if (top_to_bottom != 0) { dy = sr; }
+        var dx: usize = sc;
+        if (right_to_left != 0) { dx = width - 1 - sc; }
+
+        val di: usize = (dy * width + dx) * 4;
+        dst[di]     = r;
+        dst[di + 1] = g;
+        dst[di + 2] = b;
+        dst[di + 3] = a;
+        produced = produced + 1;
+    }
+
+    out.pixels     = dst;
+    out.width      = header.width;
+    out.height     = header.height;
+    out.channels   = header.channels;
+    out.colorspace = header.colorspace;
+    ret DECODE_OK;
+}
+
+# tga_encode_bound: encoded size for a width x height uncompressed 32-bit TGA.
+#
+# returns 0 if a dimension exceeds TGA's 16-bit field range or the size would
+# overflow usize.
+# ---
+# width:  image width in pixels
+# height: image height in pixels
+# ret:    the encoded size in bytes, or 0 if unrepresentable
+pub fun tga_encode_bound(width: u32, height: u32) usize {
+    if (width > 0xFFFF || height > 0xFFFF) { ret 0; }
+    val body: usize = image_byte_len(width, height);
+    if (body == 0) { ret 0; }
+    if (body > ~(0::usize) - TGA_HEADER_LEN) { ret 0; }
+    ret TGA_HEADER_LEN + body;
+}
+
+# tga_encode: encode an RGBA8 Image as an uncompressed 32-bit top-left TGA.
+#
+# a deliberately minimal writer for tooling output: image type 2, 32-bit BGRA,
+# top-left origin, no image id, color map, or footer. dst must be at least
+# tga_encode_bound(width, height) bytes.
+# ---
+# img:     the RGBA8 image to encode
+# dst:     destination buffer for the TGA file
+# dst_len: size of dst in bytes
+# ret:     number of bytes written, or 0 on invalid input or short buffer
+pub fun tga_encode(img: *Image, dst: *u8, dst_len: usize) usize {
+    if (img == nil || dst == nil || img.pixels == nil) { ret 0; }
+
+    val bound: usize = tga_encode_bound(img.width, img.height);
+    if (bound == 0 || dst_len < bound) { ret 0; }
+
+    var i: usize = 0;
+    for (i < TGA_HEADER_LEN) { dst[i] = 0; i = i + 1; }
+    dst[2] = TGA_TYPE_TRUECOLOR;
+    write_le16(dst, 12, img.width::u16);
+    write_le16(dst, 14, img.height::u16);
+    dst[16] = 32;
+    dst[17] = 0x28;   # bit5 top-to-bottom origin, 8 alpha bits
+
+    val px_count: usize = img.width::usize * img.height::usize;
+    var p: usize = TGA_HEADER_LEN;
+    i = 0;
+    for (i < px_count) {
+        val base: usize = i * 4;
+        dst[p]     = img.pixels[base + 2];   # B
+        dst[p + 1] = img.pixels[base + 1];   # G
+        dst[p + 2] = img.pixels[base];       # R
+        dst[p + 3] = img.pixels[base + 3];   # A
+        p = p + 4;
+        i = i + 1;
+    }
+    ret p;
+}
+
+var tga_buf: [4096]u8;
+var tga_pix: [4096]u8;
+var tga_rt:  [4096]u8;
+
+test "tga: decode uncompressed 32-bit top-left" {
+    var stream: [26]u8 = [26]u8{
+        0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        2, 0,          # width 2
+        1, 0,          # height 1
+        32, 0x20,      # 32-bit, top-to-bottom
+        30, 20, 10, 40,    # pixel0 BGRA -> RGBA(10,20,30,40)
+        70, 60, 50, 80     # pixel1 BGRA -> RGBA(50,60,70,80)
+    };
+    var img: Image;
+    if (tga_decode(?stream[0], 26, ?tga_pix[0], 4096, ?img) != DECODE_OK) { ret 1; }
+    if (img.width != 2 || img.height != 1 || img.channels != 4) { ret 1; }
+    if (tga_pix[0] != 10 || tga_pix[1] != 20 || tga_pix[2] != 30 || tga_pix[3] != 40) { ret 1; }
+    if (tga_pix[4] != 50 || tga_pix[5] != 60 || tga_pix[6] != 70 || tga_pix[7] != 80) { ret 1; }
+    ret 0;
+}
+
+test "tga: decode uncompressed 24-bit bottom-left flips rows" {
+    var stream: [24]u8 = [24]u8{
+        0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        1, 0,          # width 1
+        2, 0,          # height 2
+        24, 0x00,      # 24-bit, bottom-to-top (default origin)
+        33, 22, 11,    # storage row 0 (bottom) BGR -> RGB(11,22,33)
+        66, 55, 44     # storage row 1 (top)    BGR -> RGB(44,55,66)
+    };
+    var img: Image;
+    if (tga_decode(?stream[0], 24, ?tga_pix[0], 4096, ?img) != DECODE_OK) { ret 1; }
+    if (img.channels != 3) { ret 1; }
+    # dest row 0 (top) is storage row 1; dest row 1 (bottom) is storage row 0.
+    if (tga_pix[0] != 44 || tga_pix[1] != 55 || tga_pix[2] != 66 || tga_pix[3] != 255) { ret 1; }
+    if (tga_pix[4] != 11 || tga_pix[5] != 22 || tga_pix[6] != 33 || tga_pix[7] != 255) { ret 1; }
+    ret 0;
+}
+
+test "tga: decode rle truecolor 32-bit" {
+    var stream: [28]u8 = [28]u8{
+        0, 0, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        4, 0,          # width 4
+        1, 0,          # height 1
+        32, 0x20,      # 32-bit, top-to-bottom
+        0x82, 30, 20, 10, 40,   # RLE packet: 3 x RGBA(10,20,30,40)
+        0x00, 70, 60, 50, 80    # raw packet: 1 x RGBA(50,60,70,80)
+    };
+    var img: Image;
+    if (tga_decode(?stream[0], 28, ?tga_pix[0], 4096, ?img) != DECODE_OK) { ret 1; }
+    if (img.width != 4) { ret 1; }
+    var i: usize = 0;
+    for (i < 3) {
+        if (tga_pix[i * 4] != 10 || tga_pix[i * 4 + 1] != 20 || tga_pix[i * 4 + 2] != 30 || tga_pix[i * 4 + 3] != 40) { ret 1; }
+        i = i + 1;
+    }
+    if (tga_pix[12] != 50 || tga_pix[13] != 60 || tga_pix[14] != 70 || tga_pix[15] != 80) { ret 1; }
+    ret 0;
+}
+
+test "tga: info rejects unsupported and truncated" {
+    var img: Image;
+    var color_mapped: [18]u8;
+    color_mapped[1] = 1;   # color_map_type present
+    color_mapped[2] = 1;   # color-mapped image
+    color_mapped[12] = 1;
+    color_mapped[14] = 1;
+    color_mapped[16] = 8;
+    if (tga_info(?color_mapped[0], 18, ?img) != DECODE_UNSUPPORTED) { ret 1; }
+
+    var depth16: [18]u8;
+    depth16[2] = 2;
+    depth16[12] = 1;
+    depth16[14] = 1;
+    depth16[16] = 16;   # unsupported depth
+    if (tga_info(?depth16[0], 18, ?img) != DECODE_UNSUPPORTED) { ret 1; }
+
+    var short_header: [10]u8;
+    if (tga_info(?short_header[0], 10, ?img) != DECODE_TRUNCATED) { ret 1; }
+    ret 0;
+}
+
+test "tga: decode rejects truncated pixel data" {
+    var stream: [22]u8 = [22]u8{
+        0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        2, 0, 1, 0, 32, 0x20,
+        30, 20, 10, 40     # only one of two pixels present
+    };
+    var img: Image;
+    if (tga_decode(?stream[0], 22, ?tga_pix[0], 4096, ?img) != DECODE_TRUNCATED) { ret 1; }
+    ret 0;
+}
+
+test "tga: decode rejects short destination" {
+    var stream: [26]u8 = [26]u8{
+        0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        2, 0, 1, 0, 32, 0x20,
+        30, 20, 10, 40, 70, 60, 50, 80
+    };
+    var img: Image;
+    if (tga_decode(?stream[0], 26, ?tga_pix[0], 4, ?img) != DECODE_SHORT_BUFFER) { ret 1; }
+    ret 0;
+}
+
+test "tga: round-trip encode then decode" {
+    val w: u32 = 8;
+    val h: u32 = 8;
+    val count: usize = w::usize * h::usize;
+    var i: usize = 0;
+    for (i < count) {
+        val base: usize = i * 4;
+        tga_pix[base]     = (i * 7)::u8;
+        tga_pix[base + 1] = (i * 11)::u8;
+        tga_pix[base + 2] = (i * 13)::u8;
+        tga_pix[base + 3] = (i * 5)::u8;
+        i = i + 1;
+    }
+
+    var src: Image;
+    src.pixels     = ?tga_pix[0];
+    src.width      = w;
+    src.height     = h;
+    src.channels   = 4;
+    src.colorspace = COLORSPACE_SRGB;
+
+    val n: usize = tga_encode(?src, ?tga_buf[0], 4096);
+    if (n == 0) { ret 1; }
+
+    var img: Image;
+    if (tga_decode(?tga_buf[0], n, ?tga_rt[0], 4096, ?img) != DECODE_OK) { ret 1; }
+    if (img.width != w || img.height != h) { ret 1; }
+
+    i = 0;
+    for (i < count * 4) {
+        if (tga_rt[i] != tga_pix[i]) { ret 1; }
+        i = i + 1;
+    }
+    ret 0;
+}
