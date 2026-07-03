@@ -1,9 +1,9 @@
-# image.tga: the TGA (Truevision) codec — truecolor decoder and encoder.
+# the TGA (Truevision) codec: truecolor decoder and encoder
 #
 # TGA has an 18-byte header with little-endian fields; pixels are stored in
 # BGRA order (BGR for 24-bit) and their scanline order is set by the image
-# descriptor. this module decodes the two common truecolor variants —
-# uncompressed (type 2) and run-length encoded (type 10), at 24 or 32 bits —
+# descriptor. this module decodes the two common truecolor variants,
+# uncompressed (type 2) and run-length encoded (type 10), at 24 or 32 bits,
 # normalizing both origin orders to RGBA8, top-left. color-mapped and grayscale
 # images are recognized but reported as unsupported. the encoder emits a minimal
 # uncompressed 32-bit top-left file, enough for tooling round-trips.
@@ -32,7 +32,7 @@ fun write_le16(p: *u8, off: usize, v: u16) {
     p[off + 1] = (v >> 8)::u8;
 }
 
-# Bgra: one decoded truecolor pixel in RGBA order.
+# one decoded truecolor pixel in RGBA order
 rec Bgra {
     r: u8;
     g: u8;
@@ -40,8 +40,8 @@ rec Bgra {
     a: u8;
 }
 
-# read_bgra: read one BGR(A) source pixel at @pos, storing it as RGBA in out and
-# advancing @pos by bpp. 24-bit pixels take a fully-opaque alpha.
+# read one BGR(A) source pixel at @pos, storing it as RGBA in out and
+# advancing @pos by bpp; 24-bit pixels take a fully-opaque alpha
 fun read_bgra(src: *u8, pos: *usize, src_len: usize, bpp: usize, out: *Bgra) DecodeStatus {
     val p: usize = @pos;
     if (p + bpp > src_len) { ret DECODE_TRUNCATED; }
@@ -54,7 +54,7 @@ fun read_bgra(src: *u8, pos: *usize, src_len: usize, bpp: usize, out: *Bgra) Dec
     ret DECODE_OK;
 }
 
-# flip_rows: reverse the row order of a width x height RGBA8 buffer in place.
+# reverse the row order of a width x height RGBA8 buffer in place
 fun flip_rows(dst: *u8, width: usize, height: usize) {
     val row_bytes: usize = width * 4;
     var top: usize = 0;
@@ -74,7 +74,7 @@ fun flip_rows(dst: *u8, width: usize, height: usize) {
     }
 }
 
-# flip_cols: reverse each row of a width x height RGBA8 buffer in place.
+# reverse each row of a width x height RGBA8 buffer in place
 fun flip_cols(dst: *u8, width: usize, height: usize) {
     val row_bytes: usize = width * 4;
     var row: usize = 0;
@@ -99,7 +99,7 @@ fun flip_cols(dst: *u8, width: usize, height: usize) {
     }
 }
 
-# decode_raw: decode uncompressed truecolor pixels into dst in storage order.
+# decode uncompressed truecolor pixels into dst in storage order
 fun decode_raw(src: *u8, src_len: usize, data_start: usize, dst: *u8, px_count: usize, bpp: usize) DecodeStatus {
     var pos: usize = data_start;
     var di: usize = 0;
@@ -118,9 +118,9 @@ fun decode_raw(src: *u8, src_len: usize, data_start: usize, dst: *u8, px_count: 
     ret DECODE_OK;
 }
 
-# decode_rle: decode run-length-encoded truecolor pixels into dst in storage
+# decode run-length-encoded truecolor pixels into dst in storage
 # order. repeat packets are bulk-filled; a run that would overrun the image is
-# clamped to the remaining pixels.
+# clamped to the remaining pixels
 fun decode_rle(src: *u8, src_len: usize, data_start: usize, dst: *u8, px_count: usize, bpp: usize) DecodeStatus {
     var pos: usize = data_start;
     var di: usize = 0;
@@ -165,7 +165,7 @@ fun decode_rle(src: *u8, src_len: usize, data_start: usize, dst: *u8, px_count: 
     ret DECODE_OK;
 }
 
-# tga_info: parse a TGA header into out (dimensions and metadata only).
+# parse a TGA header into out (dimensions and metadata only)
 #
 # leaves out.pixels nil. rejects a truncated header, and reports the color-map,
 # grayscale, and non-24/32-bit variants this module does not decode as
@@ -202,7 +202,7 @@ pub fun tga_info(src: *u8, src_len: usize, out: *Image) DecodeStatus {
     ret DECODE_OK;
 }
 
-# tga_decode: decode a truecolor TGA into the caller-supplied RGBA8 buffer.
+# decode a truecolor TGA into the caller-supplied RGBA8 buffer
 #
 # handles uncompressed (type 2) and RLE (type 10) truecolor at 24 or 32 bits,
 # normalizing both scanline orders to top-left RGBA8. dst must be at least
@@ -264,7 +264,7 @@ pub fun tga_decode(src: *u8, src_len: usize, dst: *u8, dst_len: usize, out: *Ima
     ret DECODE_OK;
 }
 
-# tga_encode_bound: encoded size for a width x height uncompressed 32-bit TGA.
+# encoded size for a width x height uncompressed 32-bit TGA
 #
 # returns 0 if a dimension exceeds TGA's 16-bit field range or the size would
 # overflow usize.
@@ -280,7 +280,7 @@ pub fun tga_encode_bound(width: u32, height: u32) usize {
     ret TGA_HEADER_LEN + body;
 }
 
-# tga_encode: encode an RGBA8 Image as an uncompressed 32-bit top-left TGA.
+# encode an RGBA8 Image as an uncompressed 32-bit top-left TGA
 #
 # a deliberately minimal writer for tooling output: image type 2, 32-bit BGRA,
 # top-left origin, no image id, color map, or footer. dst must be at least

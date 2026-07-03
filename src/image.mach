@@ -1,4 +1,4 @@
-# image.image: the flat public surface of mach-image.
+# the flat public surface of mach-image
 #
 # a bare `use image;` reaches the whole API under one namespace, e.g.
 # image.VERSION, image.FORMAT_QOI, image.format_name(...).
@@ -11,7 +11,7 @@ use image.tga;
 # links the startup entrypoint so `mach test` over this library produces a binary.
 use std.runtime;
 
-# VERSION: the mach-image release this source corresponds to.
+# the mach-image release this source corresponds to
 pub val VERSION: str = "0.1.0";
 
 fwd format.FORMAT_UNKNOWN;

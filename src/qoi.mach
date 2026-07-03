@@ -1,4 +1,4 @@
-# image.qoi: the QOI (Quite OK Image) codec — decoder and encoder.
+# the QOI (Quite OK Image) codec: decoder and encoder
 #
 # QOI is a single-page, dependency-free lossless format. a 14-byte header
 # ("qoif" magic, big-endian width/height, channels, colorspace) is followed by
@@ -41,12 +41,12 @@ fun write_be32(p: *u8, off: usize, v: u32) {
     p[off + 3] = v::u8;
 }
 
-# hash_slot: the QOI running-array byte offset for an RGBA pixel.
+# the QOI running-array byte offset for an RGBA pixel
 fun hash_slot(r: u8, g: u8, b: u8, a: u8) usize {
     ret ((r::usize * 3 + g::usize * 5 + b::usize * 7 + a::usize * 11) % 64) * 4;
 }
 
-# qoi_info: parse a QOI header into out (dimensions and metadata only).
+# parse a QOI header into out (dimensions and metadata only)
 #
 # leaves out.pixels nil; the caller sizes storage with image_byte_len and then
 # calls qoi_decode. rejects a truncated, mis-magicked, or invalid header.
@@ -78,11 +78,11 @@ pub fun qoi_info(src: *u8, src_len: usize, out: *Image) DecodeStatus {
     ret DECODE_OK;
 }
 
-# qoi_decode: decode a QOI stream into the caller-supplied RGBA8 buffer.
+# decode a QOI stream into the caller-supplied RGBA8 buffer
 #
 # dst must be at least image_byte_len(width, height) bytes; on success it holds
 # RGBA8, row-major, top-left origin, and out describes it. every source read is
-# bounds-checked — a stream that ends early is rejected as DECODE_TRUNCATED.
+# bounds-checked; a stream that ends early is rejected as DECODE_TRUNCATED.
 # trailing bytes after the final pixel (including the end marker) are ignored.
 # ---
 # src:     pointer to the encoded QOI bytes
@@ -190,7 +190,7 @@ pub fun qoi_decode(src: *u8, src_len: usize, dst: *u8, dst_len: usize, out: *Ima
     ret DECODE_OK;
 }
 
-# qoi_encode_bound: worst-case encoded size for a width x height QOI image.
+# worst-case encoded size for a width x height QOI image
 #
 # every pixel costs at most 5 bytes (an RGBA chunk), plus the 14-byte header and
 # 8-byte end marker. returns 0 if the size would overflow usize.
@@ -206,7 +206,7 @@ pub fun qoi_encode_bound(width: u32, height: u32) usize {
     ret QOI_HEADER_LEN + px * 5 + QOI_PADDING;
 }
 
-# qoi_encode: encode an RGBA8 Image as a QOI stream into dst.
+# encode an RGBA8 Image as a QOI stream into dst
 #
 # img.pixels must hold image_byte_len(width, height) RGBA8 bytes; channels must
 # be 3 or 4 and colorspace 0 or 1 (written verbatim into the header). dst must
@@ -416,8 +416,8 @@ test "qoi: decode rejects nil out without crashing" {
     ret 0;
 }
 
-# fill_pattern: write a deterministic RGBA pattern that exercises every op —
-# runs of equal pixels, small diffs, luma steps, palette hits, and full colors.
+# write a deterministic RGBA pattern that exercises every op:
+# runs of equal pixels, small diffs, luma steps, palette hits, and full colors
 fun fill_pattern(buf: *u8, count: usize) {
     var i: usize = 0;
     for (i < count) {
