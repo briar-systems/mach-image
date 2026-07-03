@@ -1,0 +1,547 @@
+# image.qoi: the QOI (Quite OK Image) codec — decoder and encoder.
+#
+# QOI is a single-page, dependency-free lossless format. a 14-byte header
+# ("qoif" magic, big-endian width/height, channels, colorspace) is followed by
+# a stream of chunks decoded against a running array of 64 previously-seen
+# pixels, closed by an 8-byte end marker. this module is spec-complete: it
+# decodes and encodes every op type and round-trips.
+
+use std.types.size.usize;
+use std.memory.raw_zero;
+use image.codec.Image;
+use image.codec.image_byte_len;
+use image.codec.COLORSPACE_SRGB;
+use image.codec.COLORSPACE_LINEAR;
+use image.codec.DecodeStatus;
+use image.codec.DECODE_OK;
+use image.codec.DECODE_TRUNCATED;
+use image.codec.DECODE_BAD_MAGIC;
+use image.codec.DECODE_BAD_HEADER;
+use image.codec.DECODE_SHORT_BUFFER;
+
+val QOI_OP_INDEX: u8 = 0x00;   # 00xxxxxx
+val QOI_OP_DIFF:  u8 = 0x40;   # 01xxxxxx
+val QOI_OP_LUMA:  u8 = 0x80;   # 10xxxxxx
+val QOI_OP_RUN:   u8 = 0xC0;   # 11xxxxxx
+val QOI_OP_RGB:   u8 = 0xFE;
+val QOI_OP_RGBA:  u8 = 0xFF;
+val QOI_MASK_2:   u8 = 0xC0;
+
+val QOI_HEADER_LEN: usize = 14;
+val QOI_PADDING:    usize = 8;
+
+fun read_be32(p: *u8, off: usize) u32 {
+    ret (p[off]::u32 << 24) | (p[off + 1]::u32 << 16) | (p[off + 2]::u32 << 8) | p[off + 3]::u32;
+}
+
+fun write_be32(p: *u8, off: usize, v: u32) {
+    p[off]     = (v >> 24)::u8;
+    p[off + 1] = (v >> 16)::u8;
+    p[off + 2] = (v >> 8)::u8;
+    p[off + 3] = v::u8;
+}
+
+# hash_slot: the QOI running-array byte offset for an RGBA pixel.
+fun hash_slot(r: u8, g: u8, b: u8, a: u8) usize {
+    ret ((r::usize * 3 + g::usize * 5 + b::usize * 7 + a::usize * 11) % 64) * 4;
+}
+
+# qoi_info: parse a QOI header into out (dimensions and metadata only).
+#
+# leaves out.pixels nil; the caller sizes storage with image_byte_len and then
+# calls qoi_decode. rejects a truncated, mis-magicked, or invalid header.
+# ---
+# src:     pointer to the encoded QOI bytes
+# src_len: number of bytes available at src
+# out:     Image to populate with width/height/channels/colorspace
+# ret:     DECODE_OK, or a DECODE_* error
+pub fun qoi_info(src: *u8, src_len: usize, out: *Image) DecodeStatus {
+    if (src == nil || out == nil) { ret DECODE_BAD_HEADER; }
+    if (src_len < QOI_HEADER_LEN) { ret DECODE_TRUNCATED; }
+    if (src[0] != 'q' || src[1] != 'o' || src[2] != 'i' || src[3] != 'f') { ret DECODE_BAD_MAGIC; }
+
+    val width:      u32 = read_be32(src, 4);
+    val height:     u32 = read_be32(src, 8);
+    val channels:   u8  = src[12];
+    val colorspace: u8  = src[13];
+
+    if (width == 0 || height == 0)         { ret DECODE_BAD_HEADER; }
+    if (channels != 3 && channels != 4)    { ret DECODE_BAD_HEADER; }
+    if (colorspace != COLORSPACE_SRGB && colorspace != COLORSPACE_LINEAR) { ret DECODE_BAD_HEADER; }
+    if (image_byte_len(width, height) == 0) { ret DECODE_BAD_HEADER; }
+
+    out.pixels     = nil;
+    out.width      = width;
+    out.height     = height;
+    out.channels   = channels;
+    out.colorspace = colorspace;
+    ret DECODE_OK;
+}
+
+# qoi_decode: decode a QOI stream into the caller-supplied RGBA8 buffer.
+#
+# dst must be at least image_byte_len(width, height) bytes; on success it holds
+# RGBA8, row-major, top-left origin, and out describes it. every source read is
+# bounds-checked — a stream that ends early is rejected as DECODE_TRUNCATED.
+# trailing bytes after the final pixel (including the end marker) are ignored.
+# ---
+# src:     pointer to the encoded QOI bytes
+# src_len: number of bytes available at src
+# dst:     destination RGBA8 buffer
+# dst_len: size of dst in bytes
+# out:     Image populated to describe the decoded pixels
+# ret:     DECODE_OK, or a DECODE_* error
+pub fun qoi_decode(src: *u8, src_len: usize, dst: *u8, dst_len: usize, out: *Image) DecodeStatus {
+    if (out == nil) { ret DECODE_BAD_HEADER; }
+
+    var header: Image;
+    val st: DecodeStatus = qoi_info(src, src_len, ?header);
+    if (st != DECODE_OK) { ret st; }
+    if (dst == nil)      { ret DECODE_SHORT_BUFFER; }
+
+    val need: usize = image_byte_len(header.width, header.height);
+    if (dst_len < need) { ret DECODE_SHORT_BUFFER; }
+
+    var index: [256]u8;
+    raw_zero(?index[0], 256);
+
+    var r: u8 = 0;
+    var g: u8 = 0;
+    var b: u8 = 0;
+    var a: u8 = 255;
+
+    val px_count: usize = header.width::usize * header.height::usize;
+    var px:      usize = 0;
+    var pos:     usize = QOI_HEADER_LEN;
+    var out_pos: usize = 0;
+
+    for (px < px_count) {
+        if (pos >= src_len) { ret DECODE_TRUNCATED; }
+        val op: u8 = src[pos];
+        pos = pos + 1;
+
+        # every op but RUN yields a single pixel; RUN repeats the current one.
+        var run_len: usize = 1;
+
+        if (op == QOI_OP_RGB) {
+            if (pos + 3 > src_len) { ret DECODE_TRUNCATED; }
+            r = src[pos];
+            g = src[pos + 1];
+            b = src[pos + 2];
+            pos = pos + 3;
+        }
+        or (op == QOI_OP_RGBA) {
+            if (pos + 4 > src_len) { ret DECODE_TRUNCATED; }
+            r = src[pos];
+            g = src[pos + 1];
+            b = src[pos + 2];
+            a = src[pos + 3];
+            pos = pos + 4;
+        }
+        or ((op & QOI_MASK_2) == QOI_OP_INDEX) {
+            val slot: usize = (op & 0x3F)::usize * 4;
+            r = index[slot];
+            g = index[slot + 1];
+            b = index[slot + 2];
+            a = index[slot + 3];
+        }
+        or ((op & QOI_MASK_2) == QOI_OP_DIFF) {
+            r = r + ((op >> 4) & 0x03) - 2;
+            g = g + ((op >> 2) & 0x03) - 2;
+            b = b + (op & 0x03) - 2;
+        }
+        or ((op & QOI_MASK_2) == QOI_OP_LUMA) {
+            if (pos >= src_len) { ret DECODE_TRUNCATED; }
+            val b2: u8 = src[pos];
+            pos = pos + 1;
+            val dg: u8 = (op & 0x3F) - 32;
+            g = g + dg;
+            r = r + dg - 8 + ((b2 >> 4) & 0x0F);
+            b = b + dg - 8 + (b2 & 0x0F);
+        }
+        or {
+            run_len = (op & 0x3F)::usize + 1;
+            if (run_len > px_count - px) { run_len = px_count - px; }
+        }
+
+        val slot: usize = hash_slot(r, g, b, a);
+        index[slot]     = r;
+        index[slot + 1] = g;
+        index[slot + 2] = b;
+        index[slot + 3] = a;
+
+        var run: usize = 0;
+        for (run < run_len) {
+            dst[out_pos]     = r;
+            dst[out_pos + 1] = g;
+            dst[out_pos + 2] = b;
+            dst[out_pos + 3] = a;
+            out_pos = out_pos + 4;
+            run = run + 1;
+        }
+        px = px + run_len;
+    }
+
+    out.pixels     = dst;
+    out.width      = header.width;
+    out.height     = header.height;
+    out.channels   = header.channels;
+    out.colorspace = header.colorspace;
+    ret DECODE_OK;
+}
+
+# qoi_encode_bound: worst-case encoded size for a width x height QOI image.
+#
+# every pixel costs at most 5 bytes (an RGBA chunk), plus the 14-byte header and
+# 8-byte end marker. returns 0 if the size would overflow usize.
+# ---
+# width:  image width in pixels
+# height: image height in pixels
+# ret:    an upper bound on the encoded size in bytes, or 0 on overflow
+pub fun qoi_encode_bound(width: u32, height: u32) usize {
+    val px: usize = image_byte_len(width, height) / 4;
+    if (px == 0) { ret 0; }
+    val max: usize = ~(0::usize);
+    if (px > (max - QOI_HEADER_LEN - QOI_PADDING) / 5) { ret 0; }
+    ret QOI_HEADER_LEN + px * 5 + QOI_PADDING;
+}
+
+# qoi_encode: encode an RGBA8 Image as a QOI stream into dst.
+#
+# img.pixels must hold image_byte_len(width, height) RGBA8 bytes; channels must
+# be 3 or 4 and colorspace 0 or 1 (written verbatim into the header). dst must
+# be at least qoi_encode_bound(width, height) bytes.
+# ---
+# img:     the RGBA8 image to encode
+# dst:     destination buffer for the QOI stream
+# dst_len: size of dst in bytes
+# ret:     number of bytes written, or 0 on invalid input or short buffer
+pub fun qoi_encode(img: *Image, dst: *u8, dst_len: usize) usize {
+    if (img == nil || dst == nil || img.pixels == nil) { ret 0; }
+    if (img.channels != 3 && img.channels != 4)        { ret 0; }
+    if (img.colorspace != COLORSPACE_SRGB && img.colorspace != COLORSPACE_LINEAR) { ret 0; }
+
+    val bound: usize = qoi_encode_bound(img.width, img.height);
+    if (bound == 0 || dst_len < bound) { ret 0; }
+
+    dst[0] = 'q';
+    dst[1] = 'o';
+    dst[2] = 'i';
+    dst[3] = 'f';
+    write_be32(dst, 4, img.width);
+    write_be32(dst, 8, img.height);
+    dst[12] = img.channels;
+    dst[13] = img.colorspace;
+
+    var index: [256]u8;
+    raw_zero(?index[0], 256);
+
+    var pr: u8 = 0;
+    var pg: u8 = 0;
+    var pb: u8 = 0;
+    var pa: u8 = 255;
+
+    val px_count: usize = img.width::usize * img.height::usize;
+    var i:   usize = 0;
+    var p:   usize = QOI_HEADER_LEN;
+    var run: usize = 0;
+
+    for (i < px_count) {
+        val base: usize = i * 4;
+        val r: u8 = img.pixels[base];
+        val g: u8 = img.pixels[base + 1];
+        val b: u8 = img.pixels[base + 2];
+        val a: u8 = img.pixels[base + 3];
+
+        if (r == pr && g == pg && b == pb && a == pa) {
+            run = run + 1;
+            if (run == 62 || i == px_count - 1) {
+                dst[p] = QOI_OP_RUN | ((run - 1)::u8);
+                p = p + 1;
+                run = 0;
+            }
+        }
+        or {
+            if (run > 0) {
+                dst[p] = QOI_OP_RUN | ((run - 1)::u8);
+                p = p + 1;
+                run = 0;
+            }
+
+            val slot: usize = hash_slot(r, g, b, a);
+            if (index[slot] == r && index[slot + 1] == g && index[slot + 2] == b && index[slot + 3] == a) {
+                dst[p] = QOI_OP_INDEX | ((slot / 4)::u8);
+                p = p + 1;
+            }
+            or {
+                index[slot]     = r;
+                index[slot + 1] = g;
+                index[slot + 2] = b;
+                index[slot + 3] = a;
+
+                if (a == pa) {
+                    val dr: i64 = ((r - pr):~i8)::i64;
+                    val dg: i64 = ((g - pg):~i8)::i64;
+                    val db: i64 = ((b - pb):~i8)::i64;
+                    val dr_dg: i64 = dr - dg;
+                    val db_dg: i64 = db - dg;
+
+                    if (dr >= -2 && dr <= 1 && dg >= -2 && dg <= 1 && db >= -2 && db <= 1) {
+                        dst[p] = QOI_OP_DIFF | (((dr + 2)::u8) << 4) | (((dg + 2)::u8) << 2) | ((db + 2)::u8);
+                        p = p + 1;
+                    }
+                    or (dr_dg >= -8 && dr_dg <= 7 && dg >= -32 && dg <= 31 && db_dg >= -8 && db_dg <= 7) {
+                        dst[p]     = QOI_OP_LUMA | ((dg + 32)::u8);
+                        dst[p + 1] = (((dr_dg + 8)::u8) << 4) | ((db_dg + 8)::u8);
+                        p = p + 2;
+                    }
+                    or {
+                        dst[p]     = QOI_OP_RGB;
+                        dst[p + 1] = r;
+                        dst[p + 2] = g;
+                        dst[p + 3] = b;
+                        p = p + 4;
+                    }
+                }
+                or {
+                    dst[p]     = QOI_OP_RGBA;
+                    dst[p + 1] = r;
+                    dst[p + 2] = g;
+                    dst[p + 3] = b;
+                    dst[p + 4] = a;
+                    p = p + 5;
+                }
+            }
+        }
+
+        pr = r;
+        pg = g;
+        pb = b;
+        pa = a;
+        i = i + 1;
+    }
+
+    var e: usize = 0;
+    for (e < 7) { dst[p + e] = 0; e = e + 1; }
+    dst[p + 7] = 1;
+    p = p + 8;
+    ret p;
+}
+
+var qoi_buf: [4096]u8;
+var pix_buf: [4096]u8;
+var rt_buf:  [4096]u8;
+
+test "qoi: decode single rgba pixel" {
+    var stream: [22]u8 = [22]u8{
+        'q', 'o', 'i', 'f',
+        0, 0, 0, 1,
+        0, 0, 0, 1,
+        4, 0,
+        0xFF, 10, 20, 30, 40,
+        0, 0, 0
+    };
+    var img: Image;
+    if (qoi_decode(?stream[0], 22, ?pix_buf[0], 4096, ?img) != DECODE_OK) { ret 1; }
+    if (img.width != 1 || img.height != 1) { ret 1; }
+    if (pix_buf[0] != 10 || pix_buf[1] != 20 || pix_buf[2] != 30 || pix_buf[3] != 40) { ret 1; }
+    ret 0;
+}
+
+test "qoi: decode run of default pixel" {
+    # header for a 1x4 image, then a RUN chunk of length 4 over (0,0,0,255).
+    var stream: [23]u8 = [23]u8{
+        'q', 'o', 'i', 'f',
+        0, 0, 0, 4,
+        0, 0, 0, 1,
+        4, 0,
+        0xC3,
+        0, 0, 0, 0, 0, 0, 0, 1
+    };
+    var img: Image;
+    if (qoi_decode(?stream[0], 23, ?pix_buf[0], 4096, ?img) != DECODE_OK) { ret 1; }
+    if (img.width != 4 || img.height != 1) { ret 1; }
+    var i: usize = 0;
+    for (i < 4) {
+        if (pix_buf[i * 4] != 0 || pix_buf[i * 4 + 3] != 255) { ret 1; }
+        i = i + 1;
+    }
+    ret 0;
+}
+
+test "qoi: info rejects bad input" {
+    var img: Image;
+    var short: [4]u8 = [4]u8{'q', 'o', 'i', 'f'};
+    if (qoi_info(?short[0], 4, ?img) != DECODE_TRUNCATED) { ret 1; }
+
+    var bad_magic: [14]u8 = [14]u8{'x', 'x', 'x', 'x', 0, 0, 0, 1, 0, 0, 0, 1, 4, 0};
+    if (qoi_info(?bad_magic[0], 14, ?img) != DECODE_BAD_MAGIC) { ret 1; }
+
+    var zero_dim: [14]u8 = [14]u8{'q', 'o', 'i', 'f', 0, 0, 0, 0, 0, 0, 0, 1, 4, 0};
+    if (qoi_info(?zero_dim[0], 14, ?img) != DECODE_BAD_HEADER) { ret 1; }
+
+    var bad_ch: [14]u8 = [14]u8{'q', 'o', 'i', 'f', 0, 0, 0, 1, 0, 0, 0, 1, 2, 0};
+    if (qoi_info(?bad_ch[0], 14, ?img) != DECODE_BAD_HEADER) { ret 1; }
+    ret 0;
+}
+
+test "qoi: decode rejects short destination" {
+    var stream: [22]u8 = [22]u8{
+        'q', 'o', 'i', 'f', 0, 0, 0, 1, 0, 0, 0, 1, 4, 0,
+        0xFF, 10, 20, 30, 40, 0, 0, 0
+    };
+    var img: Image;
+    if (qoi_decode(?stream[0], 22, ?pix_buf[0], 3, ?img) != DECODE_SHORT_BUFFER) { ret 1; }
+    ret 0;
+}
+
+test "qoi: decode rejects truncated stream" {
+    # header claims 2 pixels but only one RGBA chunk is present.
+    var stream: [19]u8 = [19]u8{
+        'q', 'o', 'i', 'f', 0, 0, 0, 2, 0, 0, 0, 1, 4, 0,
+        0xFF, 10, 20, 30, 40
+    };
+    var img: Image;
+    if (qoi_decode(?stream[0], 19, ?pix_buf[0], 4096, ?img) != DECODE_TRUNCATED) { ret 1; }
+    ret 0;
+}
+
+test "qoi: decode rejects nil out without crashing" {
+    var stream: [22]u8 = [22]u8{
+        'q', 'o', 'i', 'f', 0, 0, 0, 1, 0, 0, 0, 1, 4, 0,
+        0xFF, 10, 20, 30, 40, 0, 0, 0
+    };
+    val out: *Image = nil;
+    if (qoi_decode(?stream[0], 22, ?pix_buf[0], 4096, out) != DECODE_BAD_HEADER) { ret 1; }
+    ret 0;
+}
+
+# fill_pattern: write a deterministic RGBA pattern that exercises every op —
+# runs of equal pixels, small diffs, luma steps, palette hits, and full colors.
+fun fill_pattern(buf: *u8, count: usize) {
+    var i: usize = 0;
+    for (i < count) {
+        val base: usize = i * 4;
+        buf[base]     = (i * 17)::u8;
+        buf[base + 1] = (i * 3)::u8;
+        buf[base + 2] = (255 - i)::u8;
+        buf[base + 3] = 255;
+        # every fourth pixel repeats the previous one to force runs.
+        if (i % 4 == 0 && i > 0) {
+            buf[base]     = buf[base - 4];
+            buf[base + 1] = buf[base - 3];
+            buf[base + 2] = buf[base - 2];
+            buf[base + 3] = buf[base - 1];
+        }
+        i = i + 1;
+    }
+}
+
+test "qoi: round-trip encode then decode" {
+    val w: u32 = 16;
+    val h: u32 = 16;
+    val count: usize = w::usize * h::usize;
+    fill_pattern(?pix_buf[0], count);
+
+    var src: Image;
+    src.pixels     = ?pix_buf[0];
+    src.width      = w;
+    src.height     = h;
+    src.channels   = 4;
+    src.colorspace = 0;
+
+    val n: usize = qoi_encode(?src, ?qoi_buf[0], 4096);
+    if (n == 0) { ret 1; }
+
+    var img: Image;
+    if (qoi_decode(?qoi_buf[0], n, ?rt_buf[0], 4096, ?img) != DECODE_OK) { ret 1; }
+    if (img.width != w || img.height != h) { ret 1; }
+
+    var i: usize = 0;
+    for (i < count * 4) {
+        if (rt_buf[i] != pix_buf[i]) { ret 1; }
+        i = i + 1;
+    }
+    ret 0;
+}
+
+test "qoi: encode emits spec bytes for a run" {
+    # a 2x1 image of the initial pixel (0,0,0,255) encodes to one RUN of 2.
+    val count: usize = 2;
+    var i: usize = 0;
+    for (i < count) {
+        pix_buf[i * 4]     = 0;
+        pix_buf[i * 4 + 1] = 0;
+        pix_buf[i * 4 + 2] = 0;
+        pix_buf[i * 4 + 3] = 255;
+        i = i + 1;
+    }
+    var src: Image;
+    src.pixels     = ?pix_buf[0];
+    src.width      = 2;
+    src.height     = 1;
+    src.channels   = 4;
+    src.colorspace = 0;
+
+    val n: usize = qoi_encode(?src, ?qoi_buf[0], 4096);
+    if (n != 23) { ret 1; }                 # 14 header + 1 run + 8 end
+    if (qoi_buf[14] != 0xC1) { ret 1; }     # QOI_OP_RUN | (2 - 1)
+    if (qoi_buf[22] != 1) { ret 1; }        # end marker terminator
+    ret 0;
+}
+
+test "qoi: encode emits an rgb chunk for a fresh color" {
+    # a 1x1 image whose only pixel differs widely from the initial pixel.
+    pix_buf[0] = 10;
+    pix_buf[1] = 20;
+    pix_buf[2] = 30;
+    pix_buf[3] = 255;
+    var src: Image;
+    src.pixels     = ?pix_buf[0];
+    src.width      = 1;
+    src.height     = 1;
+    src.channels   = 3;
+    src.colorspace = 0;
+
+    val n: usize = qoi_encode(?src, ?qoi_buf[0], 4096);
+    if (n != 26) { ret 1; }                 # 14 header + 4 rgb + 8 end
+    if (qoi_buf[14] != 0xFE) { ret 1; }     # QOI_OP_RGB
+    if (qoi_buf[15] != 10 || qoi_buf[16] != 20 || qoi_buf[17] != 30) { ret 1; }
+    ret 0;
+}
+
+test "qoi: round-trip with alpha variation" {
+    val w: u32 = 8;
+    val h: u32 = 8;
+    val count: usize = w::usize * h::usize;
+    var i: usize = 0;
+    for (i < count) {
+        val base: usize = i * 4;
+        pix_buf[base]     = (i * 7)::u8;
+        pix_buf[base + 1] = (i * 11)::u8;
+        pix_buf[base + 2] = (i * 13)::u8;
+        pix_buf[base + 3] = (i * 5)::u8;
+        i = i + 1;
+    }
+
+    var src: Image;
+    src.pixels     = ?pix_buf[0];
+    src.width      = w;
+    src.height     = h;
+    src.channels   = 4;
+    src.colorspace = 1;
+
+    val n: usize = qoi_encode(?src, ?qoi_buf[0], 4096);
+    if (n == 0) { ret 1; }
+
+    var img: Image;
+    if (qoi_decode(?qoi_buf[0], n, ?rt_buf[0], 4096, ?img) != DECODE_OK) { ret 1; }
+    if (img.colorspace != 1) { ret 1; }
+
+    i = 0;
+    for (i < count * 4) {
+        if (rt_buf[i] != pix_buf[i]) { ret 1; }
+        i = i + 1;
+    }
+    ret 0;
+}
