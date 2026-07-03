@@ -5,6 +5,7 @@
 
 use std.types.string.str;
 use image.format;
+use image.codec;
 # links the startup entrypoint so `mach test` over this library produces a binary.
 use std.runtime;
 
@@ -17,3 +18,17 @@ fwd format.FORMAT_TGA;
 fwd format.FORMAT_PNG;
 fwd format.FORMAT_JPEG;
 fwd format.format_name;
+fwd format.detect;
+
+fwd codec.Image;
+fwd codec.COLORSPACE_SRGB;
+fwd codec.COLORSPACE_LINEAR;
+fwd codec.image_byte_len;
+fwd codec.DecodeStatus;
+fwd codec.DECODE_OK;
+fwd codec.DECODE_TRUNCATED;
+fwd codec.DECODE_BAD_MAGIC;
+fwd codec.DECODE_BAD_HEADER;
+fwd codec.DECODE_SHORT_BUFFER;
+fwd codec.DECODE_UNSUPPORTED;
+fwd codec.decode_status_name;
