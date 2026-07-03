@@ -67,11 +67,21 @@ other targets need only a corresponding `[target.*]` entry.
 ```
 src/
   image.mach    library surface: flat public namespace (VERSION, formats, codecs)
-  format.mach   format tags (FORMAT_*) and format_name
+  format.mach   format tags (FORMAT_*), format_name, and best-effort detect
+  codec.mach    the shared Image type, colorspace hints, size and status helpers
+  qoi.mach      QOI decoder and encoder
+  tga.mach      TGA truecolor decoder (types 2 and 10) and a minimal encoder
 ```
 
-Each codec lands as its own module (`qoi.mach`, `tga.mach`, ...) exposing a
-decode/encode pair and its buffer-sizing helpers, re-exported through
+`codec.mach` defines the library's common currency: an `Image` is an RGBA8
+pixel buffer (row-major, top-left origin) with its dimensions and source
+metadata. Decoders never allocate — callers parse a header with `*_info`, size
+storage with `image_byte_len`, and pass the buffer in; a decode returns a
+`DecodeStatus` (`DECODE_OK` or a typed error). Untrusted input is bounds-checked
+and rejected cleanly, never trusted.
+
+Each codec lands as its own module (`qoi.mach`, `tga.mach`, ...) exposing its
+decode/encode entry points and buffer-sizing helpers, re-exported through
 `image.mach` so a bare `use image;` reaches the whole API under one namespace.
 
 ## Tests
