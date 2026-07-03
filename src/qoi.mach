@@ -89,6 +89,8 @@ pub fun qoi_info(src: *u8, src_len: usize, out: *Image) DecodeStatus {
 # out:     Image populated to describe the decoded pixels
 # ret:     DECODE_OK, or a DECODE_* error
 pub fun qoi_decode(src: *u8, src_len: usize, dst: *u8, dst_len: usize, out: *Image) DecodeStatus {
+    if (out == nil) { ret DECODE_BAD_HEADER; }
+
     var header: Image;
     val st: DecodeStatus = qoi_info(src, src_len, ?header);
     if (st != DECODE_OK) { ret st; }
@@ -398,6 +400,16 @@ test "qoi: decode rejects truncated stream" {
     };
     var img: Image;
     if (qoi_decode(?stream[0], 19, ?pix_buf[0], 4096, ?img) != DECODE_TRUNCATED) { ret 1; }
+    ret 0;
+}
+
+test "qoi: decode rejects nil out without crashing" {
+    var stream: [22]u8 = [22]u8{
+        'q', 'o', 'i', 'f', 0, 0, 0, 1, 0, 0, 0, 1, 4, 0,
+        0xFF, 10, 20, 30, 40, 0, 0, 0
+    };
+    val out: *Image = nil;
+    if (qoi_decode(?stream[0], 22, ?pix_buf[0], 4096, out) != DECODE_BAD_HEADER) { ret 1; }
     ret 0;
 }
 

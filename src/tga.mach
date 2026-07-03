@@ -86,6 +86,8 @@ pub fun tga_info(src: *u8, src_len: usize, out: *Image) DecodeStatus {
 # out:     Image populated to describe the decoded pixels
 # ret:     DECODE_OK, or a DECODE_* error
 pub fun tga_decode(src: *u8, src_len: usize, dst: *u8, dst_len: usize, out: *Image) DecodeStatus {
+    if (out == nil) { ret DECODE_BAD_HEADER; }
+
     var header: Image;
     val st: DecodeStatus = tga_info(src, src_len, ?header);
     if (st != DECODE_OK) { ret st; }
@@ -98,6 +100,10 @@ pub fun tga_decode(src: *u8, src_len: usize, dst: *u8, dst_len: usize, out: *Ima
     val image_type: u8   = src[2];
     val descriptor: u8   = src[17];
     val bpp: usize       = src[16]::usize / 8;
+
+    # descriptor bits 6-7 select legacy interleaving, which this decoder cannot
+    # reorder; reject rather than produce scrambled rows.
+    if (((descriptor >> 6) & 3) != 0) { ret DECODE_UNSUPPORTED; }
 
     val top_to_bottom: u8 = (descriptor >> 5) & 1;
     val right_to_left: u8 = (descriptor >> 4) & 1;
@@ -338,6 +344,29 @@ test "tga: decode rejects truncated pixel data" {
     };
     var img: Image;
     if (tga_decode(?stream[0], 22, ?tga_pix[0], 4096, ?img) != DECODE_TRUNCATED) { ret 1; }
+    ret 0;
+}
+
+test "tga: decode rejects nil out without crashing" {
+    var stream: [26]u8 = [26]u8{
+        0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        2, 0, 1, 0, 32, 0x20,
+        30, 20, 10, 40, 70, 60, 50, 80
+    };
+    val out: *Image = nil;
+    if (tga_decode(?stream[0], 26, ?tga_pix[0], 4096, out) != DECODE_BAD_HEADER) { ret 1; }
+    ret 0;
+}
+
+test "tga: decode rejects interleaved descriptor bits" {
+    # descriptor 0x40 sets an interleave bit (6) this decoder cannot reorder.
+    var stream: [26]u8 = [26]u8{
+        0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        2, 0, 1, 0, 32, 0x40,
+        30, 20, 10, 40, 70, 60, 50, 80
+    };
+    var img: Image;
+    if (tga_decode(?stream[0], 26, ?tga_pix[0], 4096, ?img) != DECODE_UNSUPPORTED) { ret 1; }
     ret 0;
 }
 
