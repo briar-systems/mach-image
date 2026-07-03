@@ -1,22 +1,22 @@
-# image.codec: the shared currency every codec speaks.
+# the shared currency every codec speaks
 #
 # a decoded image is always RGBA8, row-major, top-left origin, regardless of
 # the source format's native channel count or scanline order. buffers are
-# caller-supplied — decoders never allocate; callers size storage with
+# caller-supplied: decoders never allocate; callers size storage with
 # image_byte_len after an *_info header parse.
 
 use std.types.size.usize;
 use std.types.string.str;
 use std.types.string.str_equals;
 
-# COLORSPACE_*: colorspace hint carried through from source metadata.
+# colorspace hint carried through from source metadata
 #
-# informational only — mach-image performs no colorspace conversion. pixels are
+# informational only: mach-image performs no colorspace conversion. pixels are
 # stored exactly as decoded (see the library's color-management non-goal).
 pub val COLORSPACE_SRGB:   u8 = 0;
 pub val COLORSPACE_LINEAR: u8 = 1;
 
-# Image: an RGBA8 pixel buffer with its dimensions and source metadata.
+# an RGBA8 pixel buffer with its dimensions and source metadata
 #
 # the common currency of the library. every decoder normalizes to this shape:
 # RGBA8, row-major, top-left origin. pixels is a caller-owned buffer of
@@ -35,7 +35,7 @@ pub rec Image {
     colorspace: u8;
 }
 
-# image_byte_len: bytes required for the RGBA8 buffer of a width x height image.
+# bytes required for the RGBA8 buffer of a width x height image
 #
 # returns 0 for a zero dimension or when width*height*4 would overflow usize,
 # so a 0 result always means "cannot represent" and is never a valid size.
@@ -53,10 +53,10 @@ pub fun image_byte_len(width: u32, height: u32) usize {
     ret pixels * 4;
 }
 
-# DecodeStatus: the result of a decode attempt, DECODE_OK on success.
+# the result of a decode attempt, DECODE_OK on success
 pub def DecodeStatus: u8;
 
-# DECODE_*: decode status codes.
+# decode status codes
 # ---
 # DECODE_OK:           decode succeeded
 # DECODE_TRUNCATED:    input ended before the stream was complete
@@ -71,7 +71,7 @@ pub val DECODE_BAD_HEADER:   DecodeStatus = 3;
 pub val DECODE_SHORT_BUFFER: DecodeStatus = 4;
 pub val DECODE_UNSUPPORTED:  DecodeStatus = 5;
 
-# decode_status_name: a short lowercase name for a DecodeStatus.
+# a short lowercase name for a DecodeStatus
 # ---
 # status: a DECODE_* code
 # ret:    the status's short name, or "unknown"

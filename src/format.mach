@@ -1,19 +1,19 @@
-# image.format: identifiers for the image formats mach-image handles, and
-# best-effort detection from a byte prefix.
+# identifiers for the image formats mach-image handles, and
+# best-effort detection from a byte prefix
 
 use std.types.size.usize;
 use std.types.string.str;
 use std.types.string.str_equals;
 
-# format tags. FORMAT_UNKNOWN is the zero value for an unrecognized or
-# not-yet-detected format.
+# format tags; FORMAT_UNKNOWN is the zero value for an unrecognized or
+# not-yet-detected format
 pub val FORMAT_UNKNOWN: u8 = 0;
 pub val FORMAT_QOI:     u8 = 1;
 pub val FORMAT_TGA:     u8 = 2;
 pub val FORMAT_PNG:     u8 = 3;
 pub val FORMAT_JPEG:    u8 = 4;
 
-# format_name: the lowercase short name of a format tag, or "unknown".
+# the lowercase short name of a format tag, or "unknown"
 # ---
 # format: a FORMAT_* tag
 # ret:    the format's short name
@@ -25,13 +25,13 @@ pub fun format_name(format: u8) str {
     ret "unknown";
 }
 
-# tga_footer_signature: the 18-byte signature of a TGA 2.0 file footer.
+# the 18-byte signature of a TGA 2.0 file footer
 val tga_footer_signature: [18]u8 = [18]u8{
     'T', 'R', 'U', 'E', 'V', 'I', 'S', 'I', 'O', 'N',
     '-', 'X', 'F', 'I', 'L', 'E', '.', 0
 };
 
-# looks_like_tga: heuristic recognition of a TGA container from its header/footer.
+# heuristic recognition of a TGA container from its header/footer
 #
 # TGA has no leading magic, so detection is best-effort. a TGA 2.0 footer
 # signature is a strong positive; otherwise the 18-byte header fields are
@@ -60,11 +60,11 @@ fun looks_like_tga(src: *u8, src_len: usize) u8 {
     ret 1;
 }
 
-# detect: best-effort identification of an image format from its leading bytes.
+# best-effort identification of an image format from its leading bytes
 #
 # QOI is identified by its "qoif" magic. TGA has no magic, so it is recognized
 # heuristically (footer signature or plausible header) and may match a variant
-# the TGA decoder does not support — detection names the container, not
+# the TGA decoder does not support; detection names the container, not
 # decodability. returns FORMAT_UNKNOWN when nothing matches.
 # ---
 # src:     pointer to the leading bytes of the encoded image
