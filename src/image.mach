@@ -12,7 +12,7 @@ use image.tga;
 use std.runtime;
 
 # the mach-image release this source corresponds to
-pub val VERSION: str = "0.1.0";
+pub val VERSION: str = "0.2.0";
 
 fwd format.FORMAT_UNKNOWN;
 fwd format.FORMAT_QOI;

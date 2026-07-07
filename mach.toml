@@ -1,32 +1,38 @@
 [project]
-id      = "image"
-version = "0.1.0"
-module  = "image.mach"
-target  = "native"
-src     = "src"
-dep     = "dep"
-out     = "out/{target}/bin/{name}{ext}"
-obj     = "out/{target}/obj"
+id          = "image"
+name        = "Mach Image Library"
+description = "Mach image library"
+version     = "0.2.0"
+src         = "src"
+out         = "out/{target.name}/{profile.name}"
 
-[target.linux]
+[target.linux-x86_64]
 isa = "x86_64"
 os  = "linux"
 abi = "sysv64"
 
-[target.windows]
+[target.windows-x86_64]
 isa = "x86_64"
 os  = "windows"
 abi = "win64"
-ext = ".exe"
 
-[target.darwin]
+[target.darwin-x86_64]
 isa = "x86_64"
 os  = "darwin"
 abi = "sysv64"
 
-[lib.image]
-entry = "image.mach"
+[profile.debug]
+opt = 0
 
-[deps.mach-std]
+[profile.release]
+opt = 2
+
+[artifact.image]
+kind    = "static"
+entry   = "image.mach"
+out     = "lib/image"
+targets = ["*"]
+
+[dep.mach-std]
 git = "https://github.com/briar-systems/mach-std"
 ref = "branch/main"
