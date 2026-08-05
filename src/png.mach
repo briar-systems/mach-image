@@ -369,6 +369,18 @@ fun raw_byte_len(hdr: *PngHeader) usize {
     ret total;
 }
 
+# total scratch for this image: the inflate window, the raster, and the spare
+# byte that catches an over-long stream
+#
+# returns 0 if any step is unrepresentable, matching raw_byte_len.
+fun scratch_byte_len(hdr: *PngHeader) usize {
+    val raw: usize = raw_byte_len(hdr);
+    if (raw == 0) { ret 0; }
+    val guarded: usize = add_checked(raw, 1);
+    if (guarded == 0) { ret 0; }
+    ret add_checked(PNG_WINDOW_SCRATCH, guarded);
+}
+
 fun abs_i32(v: i32) i32 {
     if (v < 0) { ret -v; }
     ret v;
@@ -639,22 +651,19 @@ pub fun png_scratch_len(src: *u8, src_len: usize) usize {
     var hdr:  PngHeader;
     var scan: PngScan;
     if (scan_chunks(src, src_len, ?hdr, ?scan) != DECODE_OK) { ret 0; }
-
-    val raw: usize = raw_byte_len(?hdr);
-    if (raw == 0) { ret 0; }
-    val guarded: usize = add_checked(raw, 1);
-    if (guarded == 0) { ret 0; }
-    ret add_checked(PNG_WINDOW_SCRATCH, guarded);
+    ret scratch_byte_len(?hdr);
 }
 
 # validate the two-byte zlib header PNG wraps its deflate data in
 #
-# PNG fixes the compression method at deflate with a window no larger than the
-# 32 KiB the decoder carries, and forbids a preset dictionary.
+# these are bad-header rather than unsupported cases: PNG pins the compression
+# method to deflate, caps the window at the 32 KiB the decoder carries, and
+# forbids a preset dictionary, so a stream breaking any of them is invalid PNG
+# rather than a variant this decoder merely declines.
 fun check_zlib_header(cmf: u8, flg: u8) DecodeStatus {
-    if ((cmf & 0x0F) != 8) { ret DECODE_UNSUPPORTED; }
-    if ((cmf >> 4) > 7)    { ret DECODE_UNSUPPORTED; }
-    if ((flg & 0x20) != 0) { ret DECODE_UNSUPPORTED; }
+    if ((cmf & 0x0F) != 8) { ret DECODE_BAD_HEADER; }
+    if ((cmf >> 4) > 7)    { ret DECODE_BAD_HEADER; }
+    if ((flg & 0x20) != 0) { ret DECODE_BAD_HEADER; }
     # the two bytes together are a multiple of 31, which catches bit rot.
     if ((cmf::u16 * 256 + flg::u16) % 31 != 0) { ret DECODE_CORRUPT; }
     ret DECODE_OK;
@@ -680,7 +689,12 @@ fun inflate_idat(src: *u8, src_len: usize, z: *Z.Inflater, dst: *u8, dst_len: us
     var seen_iend: u8 = 0;
 
     for (seen_iend == 0) {
+        # scan_chunks already walked this framing, but the bounds are rechecked
+        # rather than assumed: nothing here should trust the source buffer.
+        if (off + PNG_CHUNK_OVER > src_len) { ret DECODE_TRUNCATED; }
         val dlen:     usize = read_be32(src, off)::usize;
+        if (off + PNG_CHUNK_OVER + dlen > src_len) { ret DECODE_TRUNCATED; }
+
         val type_off: usize = off + 4;
         val data:     usize = off + 8;
 
@@ -779,7 +793,10 @@ pub fun png_decode(src: *u8, src_len: usize, dst: *u8, dst_len: usize,
 
     val raw_len: usize = raw_byte_len(?hdr);
     if (raw_len == 0) { ret DECODE_BAD_HEADER; }
-    if (scratch_len < PNG_WINDOW_SCRATCH + raw_len + 1) { ret DECODE_SHORT_BUFFER; }
+
+    val scratch_need: usize = scratch_byte_len(?hdr);
+    if (scratch_need == 0)          { ret DECODE_BAD_HEADER; }
+    if (scratch_len < scratch_need) { ret DECODE_SHORT_BUFFER; }
 
     # the inflate window is bump-allocated out of the head of the caller's
     # scratch; the raster follows it.
@@ -977,6 +994,21 @@ var file_two_idat: [96]u8 = [96]u8{
     97, 101, 99, 231, 224, 228, 153, 32, 169, 225, 0, 0, 0, 14, 73, 68, 65, 84, 226, 230, 97,
     228, 229, 227, 103, 134, 1, 0, 7, 220, 0, 149, 250, 106, 58, 131, 0, 0, 0, 0, 73, 69, 78,
     68, 174, 66, 96, 130
+};
+# the IDAT payload is cut short, but its chunk framing and CRC stay valid, so
+# only the deflate stream itself can reveal the truncation
+var file_short_zlib: [76]u8 = [76]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 4, 0, 0, 0, 2, 8, 2,
+    0, 0, 0, 240, 202, 234, 52, 0, 0, 0, 19, 73, 68, 65, 84, 120, 218, 99, 96, 100, 98, 102,
+    97, 101, 99, 231, 224, 228, 226, 230, 97, 228, 229, 227, 136, 126, 108, 165, 0, 0, 0, 0,
+    73, 69, 78, 68, 174, 66, 96, 130
+};
+# complete deflate data whose Adler-32 trailer does not match
+var file_bad_adler: [84]u8 = [84]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 4, 0, 0, 0, 2, 8, 2,
+    0, 0, 0, 240, 202, 234, 52, 0, 0, 0, 27, 73, 68, 65, 84, 120, 218, 99, 96, 100, 98, 102,
+    97, 101, 99, 231, 224, 228, 226, 230, 97, 228, 229, 227, 103, 134, 1, 0, 7, 220, 0, 106,
+    53, 176, 94, 150, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130
 };
 var file_zerodim: [66]u8 = [66]u8{
     137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 0, 0, 0, 0, 2, 8, 2,
@@ -1229,6 +1261,20 @@ test "png: decode rejects a corrupted zlib stream" {
     raw_copy(?png_raw[0], ?file_ok[0], 84);
     png_raw[45] = png_raw[45] ^ 0xFF;
     if (png_decode(?png_raw[0], 84, ?png_pix[0], 256, ?png_work[0], 33280, ?img) != DECODE_CORRUPT) { ret 1; }
+    ret 0;
+}
+
+test "png: decode rejects an incomplete zlib stream" {
+    # the chunk framing is intact here, so the truncation is only visible once
+    # the deflate stream ends without reaching its final block
+    var img: Image;
+    if (png_decode(?file_short_zlib[0], 76, ?png_pix[0], 256, ?png_work[0], 33280, ?img) != DECODE_TRUNCATED) { ret 1; }
+    ret 0;
+}
+
+test "png: decode rejects a bad adler-32 trailer" {
+    var img: Image;
+    if (png_decode(?file_bad_adler[0], 84, ?png_pix[0], 256, ?png_work[0], 33280, ?img) != DECODE_CORRUPT) { ret 1; }
     ret 0;
 }
 
