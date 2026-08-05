@@ -23,8 +23,8 @@ use A:   std.allocator;
 use FIX: std.allocator.fixed;
 use R:   std.types.result;
 use Z:   std.compress.inflate;
+use ZL:  std.compress.zlib;
 use crc: std.crypto.hash.crc32;
-use adler: std.crypto.hash.adler32;
 use image.codec.Image;
 use image.codec.image_byte_len;
 use image.codec.COLORSPACE_SRGB;
@@ -59,7 +59,10 @@ val adam7_y_start: [7]u8 = [7]u8{0, 0, 4, 0, 2, 0, 1};
 val adam7_x_step:  [7]u8 = [7]u8{8, 8, 4, 4, 2, 2, 1};
 val adam7_y_step:  [7]u8 = [7]u8{8, 8, 8, 4, 4, 2, 2};
 
-# scratch the inflate window needs, plus slack for the allocator's alignment
+# scratch the sliding window needs, plus slack for the allocator's alignment
+#
+# a zlib Decompressor wraps an Inflater and makes that one window allocation and
+# nothing else, so the inflate layer's constant is the whole budget.
 val PNG_WINDOW_SCRATCH: usize = Z.WINDOW + 64;
 
 fun read_be32(p: *u8, off: usize) u32 {
@@ -655,37 +658,17 @@ pub fun png_scratch_len(src: *u8, src_len: usize) usize {
     ret scratch_byte_len(?hdr);
 }
 
-# validate the two-byte zlib header PNG wraps its deflate data in
-#
-# these are bad-header rather than unsupported cases: PNG pins the compression
-# method to deflate, caps the window at the 32 KiB the decoder carries, and
-# forbids a preset dictionary, so a stream breaking any of them is invalid PNG
-# rather than a variant this decoder merely declines.
-fun check_zlib_header(cmf: u8, flg: u8) DecodeStatus {
-    if ((cmf & 0x0F) != 8) { ret DECODE_BAD_HEADER; }
-    if ((cmf >> 4) > 7)    { ret DECODE_BAD_HEADER; }
-    if ((flg & 0x20) != 0) { ret DECODE_BAD_HEADER; }
-    # the two bytes together are a multiple of 31, which catches bit rot.
-    if ((cmf::u16 * 256 + flg::u16) % 31 != 0) { ret DECODE_CORRUPT; }
-    ret DECODE_OK;
-}
-
-# inflate the zlib stream spread across the IDAT chunks into dst
+# decompress the zlib stream spread across the IDAT chunks into dst
 #
 # the stream is one zlib member split at arbitrary points, so the chunk
 # boundaries mean nothing to the decompressor and each payload is fed straight
-# from the source buffer with no staging copy. the two-byte header and the
-# four-byte Adler-32 trailer may themselves straddle a boundary, so both are
-# accumulated a byte at a time. dst is one byte longer than the raster, so a
-# stream that produces too much fills it and is caught rather than truncated.
-fun inflate_idat(src: *u8, src_len: usize, z: *Z.Inflater, dst: *u8, dst_len: usize, raw_len: usize) DecodeStatus {
-    var hdr_bytes: [2]u8;
-    var trailer:   [4]u8;
-    var hdr_got:     usize = 0;
-    var trailer_got: usize = 0;
-    var produced:    usize = 0;
-    var done:        u8 = 0;
-
+# from the source buffer with no staging copy. std.compress.zlib owns the
+# framing: it validates the two-byte header, tracks the Adler-32, and reports
+# DONE only once the trailer matches, all across chunk boundaries. dst is one
+# byte longer than the raster, so a stream that produces too much fills it and
+# is caught rather than silently truncated.
+fun inflate_idat(src: *u8, src_len: usize, z: *ZL.Decompressor, dst: *u8, dst_len: usize, raw_len: usize) DecodeStatus {
+    var produced:  usize = 0;
     var off:       usize = PNG_SIG_LEN;
     var seen_iend: u8 = 0;
 
@@ -693,7 +676,7 @@ fun inflate_idat(src: *u8, src_len: usize, z: *Z.Inflater, dst: *u8, dst_len: us
         # scan_chunks already walked this framing, but the bounds are rechecked
         # rather than assumed: nothing here should trust the source buffer.
         if (off + PNG_CHUNK_OVER > src_len) { ret DECODE_TRUNCATED; }
-        val dlen:     usize = read_be32(src, off)::usize;
+        val dlen: usize = read_be32(src, off)::usize;
         if (off + PNG_CHUNK_OVER + dlen > src_len) { ret DECODE_TRUNCATED; }
 
         val type_off: usize = off + 4;
@@ -702,63 +685,33 @@ fun inflate_idat(src: *u8, src_len: usize, z: *Z.Inflater, dst: *u8, dst_len: us
         if (chunk_is(src, type_off, 'I', 'E', 'N', 'D') != 0) { seen_iend = 1; }
         or (chunk_is(src, type_off, 'I', 'D', 'A', 'T') != 0) {
             var pos: usize = 0;
-
-            for (hdr_got < 2 && pos < dlen) {
-                hdr_bytes[hdr_got] = src[data + pos];
-                hdr_got = hdr_got + 1;
-                pos     = pos + 1;
-                if (hdr_got == 2) {
-                    val hs: DecodeStatus = check_zlib_header(hdr_bytes[0], hdr_bytes[1]);
-                    if (hs != DECODE_OK) { ret hs; }
-                }
-            }
-
             for (pos < dlen) {
-                # once the deflate data ends the rest of the stream is the trailer.
-                if (done != 0) {
-                    if (trailer_got < 4) {
-                        trailer[trailer_got] = src[data + pos];
-                        trailer_got = trailer_got + 1;
-                    }
-                    pos = pos + 1;
-                    cnt;
-                }
+                val res: R.Result[ZL.Progress, str] =
+                    ZL.decompress(z, ?src[data + pos], dlen - pos, ?dst[produced], dst_len - produced);
+                if (R.is_err[ZL.Progress, str](res)) { ret DECODE_CORRUPT; }
 
-                val res: R.Result[Z.Progress, str] =
-                    Z.decompress(z, ?src[data + pos], dlen - pos, ?dst[produced], dst_len - produced);
-                if (R.is_err[Z.Progress, str](res)) { ret DECODE_CORRUPT; }
-
-                val p: Z.Progress = R.unwrap_ok[Z.Progress, str](res);
+                val p: ZL.Progress = R.unwrap_ok[ZL.Progress, str](res);
                 pos      = pos + p.consumed;
                 produced = produced + p.written;
 
                 # dst carries a spare byte, so filling it means the stream
                 # decompresses to more than the header's dimensions allow.
-                if (p.status == Z.OUTPUT_FULL) { ret DECODE_CORRUPT; }
-
-                if (p.status == Z.DONE) {
-                    done = 1;
-                    # the decoder reads ahead, so trailer bytes may already be
-                    # sitting in its bit buffer; those come first.
-                    Z.align_to_byte(z);
-                    for (Z.buffered_bytes(z) > 0 && trailer_got < 4) {
-                        trailer[trailer_got] = Z.pop_buffered(z);
-                        trailer_got = trailer_got + 1;
-                    }
-                }
+                if (p.status == ZL.OUTPUT_FULL) { ret DECODE_CORRUPT; }
+                # bytes trailing a finished stream are not ours to interpret.
+                if (p.status == ZL.DONE)        { brk; }
+                # a call that neither consumed nor produced cannot be repeated
+                # to any effect; stop and let the checks below classify it.
+                if (p.consumed == 0 && p.written == 0) { brk; }
             }
         }
 
         off = off + PNG_CHUNK_OVER + dlen;
     }
 
-    if (hdr_got < 2) { ret DECODE_TRUNCATED; }
-    if (R.is_err[bool, str](Z.finish(z))) { ret DECODE_TRUNCATED; }
-    if (produced != raw_len)  { ret DECODE_CORRUPT; }
-    if (trailer_got < 4)      { ret DECODE_TRUNCATED; }
-
-    val want: u32 = read_be32(?trailer[0], 0);
-    if (adler.hash(dst, raw_len) != want) { ret DECODE_CORRUPT; }
+    # finish reports a stream that never reached its trailer, which is how a
+    # payload cut short mid-deflate surfaces.
+    if (R.is_err[bool, str](ZL.finish(z))) { ret DECODE_TRUNCATED; }
+    if (produced != raw_len) { ret DECODE_CORRUPT; }
     ret DECODE_OK;
 }
 
@@ -806,13 +759,13 @@ pub fun png_decode(src: *u8, src_len: usize, dst: *u8, dst_len: usize,
     val mk: O.Option[*u8] = FIX.make(?alloc, ?fixed, scratch, PNG_WINDOW_SCRATCH);
     if (O.is_some[*u8](mk)) { ret DECODE_SHORT_BUFFER; }
 
-    val zres: R.Result[Z.Inflater, str] = Z.init(?alloc);
-    if (R.is_err[Z.Inflater, str](zres)) { ret DECODE_SHORT_BUFFER; }
-    var z: Z.Inflater = R.unwrap_ok[Z.Inflater, str](zres);
+    val zres: R.Result[ZL.Decompressor, str] = ZL.init(?alloc);
+    if (R.is_err[ZL.Decompressor, str](zres)) { ret DECODE_SHORT_BUFFER; }
+    var z: ZL.Decompressor = R.unwrap_ok[ZL.Decompressor, str](zres);
 
     val raw: *u8 = ?scratch[PNG_WINDOW_SCRATCH];
     val ist: DecodeStatus = inflate_idat(src, src_len, ?z, raw, raw_len + 1, raw_len);
-    Z.dnit(?z);
+    ZL.dnit(?z);
     if (ist != DECODE_OK) { ret ist; }
 
     var ctx: PngCtx;
