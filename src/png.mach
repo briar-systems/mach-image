@@ -7,11 +7,10 @@
 # raster: one filter byte per scanline followed by the scanline's bytes, with
 # an interlaced image splitting the raster into seven Adam7 passes.
 #
-# this module decodes bit depths 8 and 16 across all five color types, the five
-# scanline filters, and both interlace methods, normalizing everything to RGBA8.
-# 16-bit samples are reduced to 8 bits by keeping the high byte. sub-byte depths
-# (1, 2, 4) are valid PNG this decoder does not handle and are rejected as
-# DECODE_UNSUPPORTED rather than decoded wrongly. every chunk's CRC is verified.
+# this module decodes every spec-defined bit depth across all five color types,
+# the five scanline filters, and both interlace methods, normalizing everything
+# to RGBA8. 16-bit samples keep their high byte; 1/2/4-bit grayscale samples are
+# replicated to 8 bits. every chunk's CRC is verified.
 
 use std.types.size.usize;
 use std.types.string.str;
@@ -111,7 +110,7 @@ fun chunk_type_byte(b: u8) u8 {
 # the IHDR fields the decoder needs, plus the derived sample count
 # ---
 # width, height: image dimensions in pixels
-# depth:         bits per sample (8 or 16 once accepted)
+# depth:         bits per sample (1, 2, 4, 8, or 16 as allowed by color type)
 # color_type:    PNG_COLOR_*
 # interlace:     0 none, 1 Adam7
 # channels:      samples per source pixel, derived from color_type
@@ -176,9 +175,8 @@ fun depth_allowed(color_type: u8, depth: u8) u8 {
 
 # parse the IHDR payload at data into out
 #
-# separates malformed from merely unsupported: a field the spec does not define
-# is DECODE_BAD_HEADER, while a valid sub-byte depth this decoder does not
-# handle is DECODE_UNSUPPORTED.
+# separates malformed from unsupported: a field the spec does not define is
+# DECODE_BAD_HEADER; all spec-defined depth/color combinations are accepted.
 fun parse_ihdr(src: *u8, data: usize, out: *PngHeader) DecodeStatus {
     val width:       u32 = read_be32(src, data);
     val height:      u32 = read_be32(src, data + 4);
@@ -201,9 +199,6 @@ fun parse_ihdr(src: *u8, data: usize, out: *PngHeader) DecodeStatus {
 
     # the output buffer has to be representable before any size arithmetic runs.
     if (image_byte_len(width, height) == 0)    { ret DECODE_BAD_HEADER; }
-
-    # sub-byte depths are well-formed PNG this decoder does not unpack.
-    if (depth != 8 && depth != 16)             { ret DECODE_UNSUPPORTED; }
 
     out.width      = width;
     out.height     = height;
@@ -291,9 +286,11 @@ fun scan_chunks(src: *u8, src_len: usize, hdr: *PngHeader, out: *PngScan) Decode
                 ret DECODE_BAD_HEADER;
             }
             if (dlen == 0 || dlen % 3 != 0)          { ret DECODE_BAD_HEADER; }
-            # 256 is also the depth-8 index ceiling, the only depth a palette
-            # reaches here: parse_ihdr has already turned 1/2/4 away.
             if (dlen / 3 > 256)                      { ret DECODE_BAD_HEADER; }
+            if (hdr.color_type == PNG_COLOR_PALETTE
+                && dlen / 3 > (1::usize << hdr.depth::usize)) {
+                ret DECODE_BAD_HEADER;
+            }
             out.plte_off     = data;
             out.plte_entries = dlen / 3;
             out.has_plte     = 1;
@@ -361,9 +358,20 @@ fun filtered_row_len(w: usize, channels: usize, depth: usize) usize {
     if (w == 0) { ret 0; }
     val samples: usize = mul_checked(w, channels);
     if (samples == 0) { ret 0; }
-    val bytes: usize = mul_checked(samples, depth / 8);
-    if (bytes == 0) { ret 0; }
+    val bits: usize = mul_checked(samples, depth);
+    if (bits == 0) { ret 0; }
+    val padded: usize = add_checked(bits, 7);
+    if (padded == 0) { ret 0; }
+    val bytes: usize = padded / 8;
     ret add_checked(bytes, 1);
+}
+
+# the byte stride PNG's scanline filters use for one source pixel
+#
+# The spec rounds channels*depth up to a whole byte and requires at least one,
+# so every sub-byte grayscale/palette row filters with bpp=1.
+fun filter_bpp(channels: usize, depth: usize) usize {
+    ret (channels * depth + 7) / 8;
 }
 
 # bytes the fully decompressed raster occupies
@@ -432,8 +440,8 @@ fun paeth(a: u8, b: u8, c: u8) u8 {
 #
 # cur is the scanline's data bytes (the filter byte already stripped) and prev
 # the previous scanline's, or nil on the first row of a pass, where the spec
-# treats the row above as all zero. bpp is the filter's byte stride, which for
-# depths 8 and 16 is a whole number of bytes. all arithmetic is mod 256.
+# treats the row above as all zero. bpp is the filter's byte stride, rounded up
+# to one byte for sub-byte pixels. all arithmetic is mod 256.
 fun unfilter_row(filter: u8, cur: *u8, prev: *u8, len: usize, bpp: usize) DecodeStatus {
     var i: usize = 0;
 
@@ -486,19 +494,35 @@ fun unfilter_row(filter: u8, cur: *u8, prev: *u8, len: usize, bpp: usize) Decode
     ret DECODE_CORRUPT;
 }
 
-# the i-th sample of a source pixel at its stored precision
-fun sample_full(src: *u8, i: usize, depth: u8) u16 {
-    if (depth == 16) { ret read_be16(src, i * 2); }
-    ret src[i]::u16;
+# the mask for one sample at depth
+fun sample_mask(depth: u8) u16 {
+    if (depth == 16) { ret 0xFFFF; }
+    ret ((1::usize << depth::usize) - 1)::u16;
 }
 
-# the i-th sample reduced to 8 bits
+# the i-th sample of a row pixel at its stored precision
 #
-# a 16-bit sample keeps its high byte, the usual truncation; mach-image does no
-# colorspace work, so no rounding or gamma correction is applied.
-fun sample_8(src: *u8, i: usize, depth: u8) u8 {
-    if (depth == 16) { ret src[i * 2]; }
-    ret src[i];
+# bit_off is the pixel's first bit within the row. sub-byte samples are packed
+# most-significant first and never cross a byte because every valid depth divides
+# eight; byte-aligned samples retain PNG's big-endian 16-bit representation.
+fun source_sample(src: *u8, bit_off: usize, i: usize, depth: u8) u16 {
+    val at: usize = bit_off + i * depth::usize;
+    if (depth < 8) {
+        val shift: usize = 8 - depth::usize - (at & 7);
+        ret ((src[at / 8]::usize >> shift) & sample_mask(depth)::usize)::u16;
+    }
+    if (depth == 16) { ret read_be16(src, at / 8); }
+    ret src[at / 8]::u16;
+}
+
+# reduce one stored sample to 8 bits
+#
+# 16-bit samples keep their high byte. sub-byte grayscale uses exact bit
+# replication: multiplying by 255/max produces 0/255, 0/85/170/255, or n*17.
+fun sample_8(sample: u16, depth: u8) u8 {
+    if (depth == 16) { ret (sample >> 8)::u8; }
+    if (depth == 8)  { ret sample::u8; }
+    ret ((sample * 255) / sample_mask(depth))::u8;
 }
 
 # a tRNS sample reduced to the image depth
@@ -507,8 +531,7 @@ fun sample_8(src: *u8, i: usize, depth: u8) u8 {
 # high byte is unused and must not affect the transparency comparison.
 fun trns_sample(ctx: *PngCtx, off: usize) u16 {
     val sample: u16 = read_be16(ctx.trns, off);
-    if (ctx.depth == 8) { ret sample & 0x00FF; }
-    ret sample;
+    ret sample & sample_mask(ctx.depth);
 }
 
 # expand one source pixel to RGBA8
@@ -516,30 +539,34 @@ fun trns_sample(ctx: *PngCtx, off: usize) u16 {
 # tRNS is matched against the sample at its stored precision, not the reduced
 # 8-bit value, so two 16-bit samples that collapse to the same byte stay
 # distinguishable.
-fun emit_pixel(ctx: *PngCtx, src: *u8, dst: *u8) DecodeStatus {
+fun emit_pixel(ctx: *PngCtx, src: *u8, bit_off: usize, dst: *u8) DecodeStatus {
     val depth: u8 = ctx.depth;
 
     if (ctx.color_type == PNG_COLOR_GRAY) {
-        val g: u8 = sample_8(src, 0, depth);
+        val full: u16 = source_sample(src, bit_off, 0, depth);
+        val g: u8 = sample_8(full, depth);
         dst[0] = g;
         dst[1] = g;
         dst[2] = g;
         dst[3] = 255;
-        if (ctx.has_trns != 0 && sample_full(src, 0, depth) == trns_sample(ctx, 0)) {
+        if (ctx.has_trns != 0 && full == trns_sample(ctx, 0)) {
             dst[3] = 0;
         }
         ret DECODE_OK;
     }
 
     if (ctx.color_type == PNG_COLOR_RGB) {
-        dst[0] = sample_8(src, 0, depth);
-        dst[1] = sample_8(src, 1, depth);
-        dst[2] = sample_8(src, 2, depth);
+        val r: u16 = source_sample(src, bit_off, 0, depth);
+        val g: u16 = source_sample(src, bit_off, 1, depth);
+        val b: u16 = source_sample(src, bit_off, 2, depth);
+        dst[0] = sample_8(r, depth);
+        dst[1] = sample_8(g, depth);
+        dst[2] = sample_8(b, depth);
         dst[3] = 255;
         if (ctx.has_trns != 0) {
-            if (sample_full(src, 0, depth) == trns_sample(ctx, 0)
-                && sample_full(src, 1, depth) == trns_sample(ctx, 2)
-                && sample_full(src, 2, depth) == trns_sample(ctx, 4)) {
+            if (r == trns_sample(ctx, 0)
+                && g == trns_sample(ctx, 2)
+                && b == trns_sample(ctx, 4)) {
                 dst[3] = 0;
             }
         }
@@ -547,7 +574,7 @@ fun emit_pixel(ctx: *PngCtx, src: *u8, dst: *u8) DecodeStatus {
     }
 
     if (ctx.color_type == PNG_COLOR_PALETTE) {
-        val idx: usize = src[0]::usize;
+        val idx: usize = source_sample(src, bit_off, 0, depth)::usize;
         if (idx >= ctx.plte_entries) { ret DECODE_CORRUPT; }
         val base: usize = idx * 3;
         dst[0] = ctx.plte[base];
@@ -560,18 +587,18 @@ fun emit_pixel(ctx: *PngCtx, src: *u8, dst: *u8) DecodeStatus {
     }
 
     if (ctx.color_type == PNG_COLOR_GRAY_ALPHA) {
-        val g: u8 = sample_8(src, 0, depth);
+        val g: u8 = sample_8(source_sample(src, bit_off, 0, depth), depth);
         dst[0] = g;
         dst[1] = g;
         dst[2] = g;
-        dst[3] = sample_8(src, 1, depth);
+        dst[3] = sample_8(source_sample(src, bit_off, 1, depth), depth);
         ret DECODE_OK;
     }
 
-    dst[0] = sample_8(src, 0, depth);
-    dst[1] = sample_8(src, 1, depth);
-    dst[2] = sample_8(src, 2, depth);
-    dst[3] = sample_8(src, 3, depth);
+    dst[0] = sample_8(source_sample(src, bit_off, 0, depth), depth);
+    dst[1] = sample_8(source_sample(src, bit_off, 1, depth), depth);
+    dst[2] = sample_8(source_sample(src, bit_off, 2, depth), depth);
+    dst[3] = sample_8(source_sample(src, bit_off, 3, depth), depth);
     ret DECODE_OK;
 }
 
@@ -586,7 +613,8 @@ fun decode_raster(hdr: *PngHeader, ctx: *PngCtx, raw: *u8, raw_len: usize, dst: 
     val height:   usize = hdr.height::usize;
     val channels: usize = hdr.channels::usize;
     val depth:    usize = hdr.depth::usize;
-    val bpp:      usize = channels * (depth / 8);
+    val bpp:      usize = filter_bpp(channels, depth);
+    val pixel_bits: usize = channels * depth;
 
     var pass_count: usize = 1;
     if (hdr.interlace != 0) { pass_count = 7; }
@@ -611,7 +639,9 @@ fun decode_raster(hdr: *PngHeader, ctx: *PngCtx, raw: *u8, raw_len: usize, dst: 
         }
 
         if (pw != 0 && ph != 0) {
-            val row_bytes: usize = pw * bpp;
+            val filtered: usize = filtered_row_len(pw, channels, depth);
+            if (filtered == 0) { ret DECODE_CORRUPT; }
+            val row_bytes: usize = filtered - 1;
             var prev: *u8 = nil;
             var row:  usize = 0;
             for (row < ph) {
@@ -626,7 +656,8 @@ fun decode_raster(hdr: *PngHeader, ctx: *PngCtx, raw: *u8, raw_len: usize, dst: 
                 var col: usize = 0;
                 for (col < pw) {
                     val x: usize = x_start + col * x_step;
-                    val es: DecodeStatus = emit_pixel(ctx, ?cur[col * bpp], ?dst[(y * width + x) * 4]);
+                    val es: DecodeStatus = emit_pixel(
+                        ctx, cur, col * pixel_bits, ?dst[(y * width + x) * 4]);
                     if (es != DECODE_OK) { ret es; }
                     col = col + 1;
                 }
@@ -918,6 +949,25 @@ var pal8_expect: [32]u8 = [32]u8{
     255, 255, 0, 255, 0, 128, 255, 0, 0, 0
 };
 
+# packed samples are MSB-first and each row ends on a byte boundary
+var gray1_raw: [2]u8 = [2]u8{0, 168};
+var gray1_expect: [20]u8 = [20]u8{
+    255, 255, 255, 255, 0, 0, 0, 255, 255, 255, 255, 255, 0, 0, 0, 255, 255, 255, 255, 255
+};
+var gray2_raw: [3]u8 = [3]u8{0, 27, 0};
+var gray2_expect: [20]u8 = [20]u8{
+    0, 0, 0, 255, 85, 85, 85, 255, 170, 170, 170, 255, 255, 255, 255, 255, 0, 0, 0, 255
+};
+var gray4_raw: [3]u8 = [3]u8{0, 10, 240};
+var gray4_trns: [2]u8 = [2]u8{0, 10};
+var gray4_expect: [12]u8 = [12]u8{
+    0, 0, 0, 255, 170, 170, 170, 0, 255, 255, 255, 255
+};
+var pal2_raw: [3]u8 = [3]u8{0, 27, 64};
+var pal2_expect: [20]u8 = [20]u8{
+    255, 0, 0, 0, 0, 255, 0, 128, 0, 0, 255, 255, 255, 255, 0, 255, 0, 255, 0, 128
+};
+
 # 4x2 gray+alpha 8
 var ga8_raw:    [18]u8 = [18]u8{0, 10, 255, 20, 128, 30, 0, 40, 64, 3, 45, 130, 25, 190, 25, 73, 25, 224};
 var ga8_expect: [32]u8 = [32]u8{
@@ -1008,9 +1058,7 @@ var file_huge: [66]u8 = [66]u8{
     255, 255, 16, 6, 0, 0, 0, 68, 89, 215, 37, 0, 0, 0, 9, 73, 68, 65, 84, 120, 218, 99, 0, 0,
     0, 1, 0, 1, 177, 13, 182, 147, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130
 };
-# chunk-ordering cases the corpus cannot reach: PngSuite's missing-IDAT and
-# bad-IDAT-CRC files are both 1-bit, so they are rejected as an unsupported
-# depth long before the defect their names describe is read.
+# focused chunk-ordering cases independent of the corpus fixtures
 var file_no_idat: [45]u8 = [45]u8{
     137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 4, 0, 0, 0, 2, 8, 2,
     0, 0, 0, 240, 202, 234, 52, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130
@@ -1160,6 +1208,42 @@ test "png: palette expands through a partial tRNS" {
     ret 0;
 }
 
+test "png: sub-byte grayscale unpacks and scales stored samples" {
+    var hdr: PngHeader;
+    var ctx: PngCtx;
+
+    test_ctx(?hdr, ?ctx, 5, 1, 1, PNG_COLOR_GRAY, 0);
+    if (run_raster(?hdr, ?ctx, ?gray1_raw[0], 2) != DECODE_OK) { ret 1; }
+    if (!raw_equal(?png_pix[0], ?gray1_expect[0], 20)) { ret 1; }
+
+    test_ctx(?hdr, ?ctx, 5, 1, 2, PNG_COLOR_GRAY, 0);
+    if (run_raster(?hdr, ?ctx, ?gray2_raw[0], 3) != DECODE_OK) { ret 2; }
+    if (!raw_equal(?png_pix[0], ?gray2_expect[0], 20)) { ret 2; }
+
+    test_ctx(?hdr, ?ctx, 3, 1, 4, PNG_COLOR_GRAY, 0);
+    ctx.has_trns = 1;
+    ctx.trns     = ?gray4_trns[0];
+    ctx.trns_len = 2;
+    if (run_raster(?hdr, ?ctx, ?gray4_raw[0], 3) != DECODE_OK) { ret 3; }
+    if (!raw_equal(?png_pix[0], ?gray4_expect[0], 12)) { ret 3; }
+    ret 0;
+}
+
+test "png: sub-byte palette uses row padding and partial tRNS" {
+    var hdr: PngHeader;
+    var ctx: PngCtx;
+    test_ctx(?hdr, ?ctx, 5, 1, 2, PNG_COLOR_PALETTE, 0);
+    ctx.plte         = ?pal8_plte[0];
+    ctx.plte_entries = 4;
+    ctx.has_trns     = 1;
+    ctx.trns         = ?pal8_trns[0];
+    ctx.trns_len     = 2;
+
+    if (run_raster(?hdr, ?ctx, ?pal2_raw[0], 3) != DECODE_OK) { ret 1; }
+    if (!raw_equal(?png_pix[0], ?pal2_expect[0], 20)) { ret 1; }
+    ret 0;
+}
+
 test "png: gray+alpha carries its alpha channel" {
     var hdr: PngHeader;
     var ctx: PngCtx;
@@ -1263,9 +1347,14 @@ test "png: info rejects a truncated stream" {
     ret 0;
 }
 
-test "png: info reports sub-byte depths as unsupported, not malformed" {
+test "png: sub-byte grayscale decodes through the public API" {
     var img: Image;
-    if (png_info(?file_gray1[0], 69, ?img) != DECODE_UNSUPPORTED) { ret 1; }
+    if (png_info(?file_gray1[0], 69, ?img) != DECODE_OK) { ret 1; }
+    if (img.width != 4 || img.height != 2 || img.channels != 3) { ret 2; }
+    if (png_decode(?file_gray1[0], 69, ?png_pix[0], 256,
+                   ?png_work[0], 33280, ?img) != DECODE_OK) { ret 3; }
+    if (png_pix[0] != 255 || png_pix[4] != 0 || png_pix[8] != 255 || png_pix[12] != 255) { ret 4; }
+    if (png_pix[16] != 0 || png_pix[20] != 255 || png_pix[24] != 0 || png_pix[28] != 0) { ret 5; }
     ret 0;
 }
 

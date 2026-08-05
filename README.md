@@ -33,7 +33,7 @@ images from the toolchain (screenshots, generated assets).
 |---|---|---|---|
 | QOI | all chunk types | yes | spec-complete, round-trips |
 | TGA | truecolor types 2 and 10, 24- and 32-bit | 32-bit uncompressed | color-mapped and grayscale variants are rejected, not decoded |
-| PNG | bit depths 8 and 16 across all five color types, filters 0-4, Adam7 interlace, tRNS | — | sub-byte depths (1, 2, 4) are rejected as unsupported; every chunk CRC is validated |
+| PNG | every spec-defined bit depth across all five color types, filters 0-4, Adam7 interlace, tRNS | — | 1/2/4-bit samples are unpacked MSB-first; every chunk CRC is validated |
 | JPEG | — | — | not started |
 
 A decoder rejects a variant it does not implement rather than producing
@@ -47,7 +47,7 @@ approximate pixels, so an unsupported configuration is always a typed
     slice for the codec surface.
   - **TGA** — next: uncompressed and RLE variants, still no external
     dependencies.
-  - **PNG** — third: 8- and 16-bit decoding across every color type, backed by
+  - **PNG** — third: every valid bit depth across every color type, backed by
     mach-std's DEFLATE implementation and the PngSuite corpus.
   - **JPEG** — later, once the lossless formats are solid.
 - Encoders for at least **QOI** and **PNG**, sized for tooling use
