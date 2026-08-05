@@ -64,12 +64,14 @@ pub def DecodeStatus: u8;
 # DECODE_BAD_HEADER:   a header field was invalid (bad dimension, channels, ...)
 # DECODE_SHORT_BUFFER: the destination buffer was smaller than image_byte_len
 # DECODE_UNSUPPORTED:  a valid but unsupported variant of the format
+# DECODE_CORRUPT:      the stream is well-formed but failed an integrity check
 pub val DECODE_OK:           DecodeStatus = 0;
 pub val DECODE_TRUNCATED:    DecodeStatus = 1;
 pub val DECODE_BAD_MAGIC:    DecodeStatus = 2;
 pub val DECODE_BAD_HEADER:   DecodeStatus = 3;
 pub val DECODE_SHORT_BUFFER: DecodeStatus = 4;
 pub val DECODE_UNSUPPORTED:  DecodeStatus = 5;
+pub val DECODE_CORRUPT:      DecodeStatus = 6;
 
 # a short lowercase name for a DecodeStatus
 # ---
@@ -82,6 +84,7 @@ pub fun decode_status_name(status: DecodeStatus) str {
     if (status == DECODE_BAD_HEADER)   { ret "bad-header"; }
     if (status == DECODE_SHORT_BUFFER) { ret "short-buffer"; }
     if (status == DECODE_UNSUPPORTED)  { ret "unsupported"; }
+    if (status == DECODE_CORRUPT)      { ret "corrupt"; }
     ret "unknown";
 }
 
@@ -107,6 +110,7 @@ test "codec: status names" {
     if (!str_equals(decode_status_name(DECODE_OK), "ok"))                { ret 1; }
     if (!str_equals(decode_status_name(DECODE_TRUNCATED), "truncated"))  { ret 1; }
     if (!str_equals(decode_status_name(DECODE_SHORT_BUFFER), "short-buffer")) { ret 1; }
+    if (!str_equals(decode_status_name(DECODE_CORRUPT), "corrupt"))      { ret 1; }
     if (!str_equals(decode_status_name(200), "unknown"))                 { ret 1; }
     ret 0;
 }
