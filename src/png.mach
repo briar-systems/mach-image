@@ -42,7 +42,10 @@ val PNG_IHDR_LEN:   usize = 13;
 val PNG_CHUNK_OVER: usize = 12;   # length + type + crc around every payload
 
 # the fixed 8-byte PNG signature
-val png_signature: [8]u8 = [8]u8{137, 80, 78, 71, 13, 10, 26, 10};
+#
+# the trailing CR/LF/EOF bytes are deliberate: they make a file mangled by a
+# text-mode transfer fail the check instead of decoding to garbage.
+pub val PNG_SIGNATURE: [8]u8 = [8]u8{137, 80, 78, 71, 13, 10, 26, 10};
 
 pub val PNG_COLOR_GRAY:       u8 = 0;
 pub val PNG_COLOR_RGB:        u8 = 2;
@@ -214,7 +217,7 @@ fun scan_chunks(src: *u8, src_len: usize, hdr: *PngHeader, out: *PngScan) Decode
 
     var i: usize = 0;
     for (i < PNG_SIG_LEN) {
-        if (src[i] != png_signature[i]) { ret DECODE_BAD_MAGIC; }
+        if (src[i] != PNG_SIGNATURE[i]) { ret DECODE_BAD_MAGIC; }
         i = i + 1;
     }
 

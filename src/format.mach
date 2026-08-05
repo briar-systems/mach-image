@@ -4,6 +4,7 @@
 use std.types.size.usize;
 use std.types.string.str;
 use std.types.string.str_equals;
+use image.png.PNG_SIGNATURE;
 
 # format tags; FORMAT_UNKNOWN is the zero value for an unrecognized or
 # not-yet-detected format
@@ -24,9 +25,6 @@ pub fun format_name(format: u8) str {
     if (format == FORMAT_JPEG) { ret "jpeg"; }
     ret "unknown";
 }
-
-# the fixed 8-byte signature every PNG file opens with
-val png_signature: [8]u8 = [8]u8{137, 80, 78, 71, 13, 10, 26, 10};
 
 # the 18-byte signature of a TGA 2.0 file footer
 val tga_footer_signature: [18]u8 = [18]u8{
@@ -82,7 +80,7 @@ pub fun detect(src: *u8, src_len: usize) u8 {
         var i: usize = 0;
         var png_ok: u8 = 1;
         for (i < 8) {
-            if (src[i] != png_signature[i]) { png_ok = 0; }
+            if (src[i] != PNG_SIGNATURE[i]) { png_ok = 0; }
             i = i + 1;
         }
         if (png_ok == 1) { ret FORMAT_PNG; }
