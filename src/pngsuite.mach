@@ -39,6 +39,10 @@ use image.codec.DECODE_BAD_HEADER;
 use image.codec.DECODE_UNSUPPORTED;
 use image.codec.DECODE_CORRUPT;
 use image.png.png_info;
+use image.png.png_decode;
+use image.png.png_scratch_len;
+use image.codec.image_byte_len;
+use fnv: std.crypto.hash.fnv1a;
 
 # 1 when png_info reports want, and on success the expected geometry too
 fun expect_info(data: *u8, len: usize, want: DecodeStatus, w: u32, h: u32, ch: u8) u8 {
@@ -6519,3 +6523,39 @@ pub fun pngsuite_decodable(i: usize, out_len: *usize, out_w: *u32, out_h: *u32) 
 }
 
 pub val PNGSUITE_DECODABLE_COUNT: usize = 93;
+
+# 256x256 RGB8 is the corpus's largest image: 262144 output bytes over a
+# 196865-byte raster plus the inflate window.
+var suite_pix:     [262144]u8;
+var suite_scratch: [262144]u8;
+
+test "pngsuite: every supported image decodes to its expected pixels" {
+    var i: usize = 0;
+    for (i < PNGSUITE_DECODABLE_COUNT) {
+        var len: usize = 0;
+        var w:   u32 = 0;
+        var h:   u32 = 0;
+        val data: *u8 = pngsuite_decodable(i, ?len, ?w, ?h);
+        if (data == nil) { ret (i + 1)::i32; }
+
+        val scratch_need: usize = png_scratch_len(data, len);
+        if (scratch_need == 0 || scratch_need > 262144) { ret (i + 1)::i32; }
+
+        var img: Image;
+        if (png_decode(data, len, ?suite_pix[0], 262144, ?suite_scratch[0], 262144, ?img) != DECODE_OK) {
+            ret (i + 1)::i32;
+        }
+        if (img.width != w || img.height != h) { ret (i + 1)::i32; }
+
+        var hash: u64 = fnv.FNV_INIT;
+        var b:    usize = 0;
+        val need: usize = image_byte_len(w, h);
+        for (b < need) {
+            hash = fnv.step_u8(hash, suite_pix[b]);
+            b = b + 1;
+        }
+        if (hash != pngsuite_hashes[i]) { ret (i + 1)::i32; }
+        i = i + 1;
+    }
+    ret 0;
+}

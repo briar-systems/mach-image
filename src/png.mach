@@ -14,8 +14,17 @@
 # DECODE_UNSUPPORTED rather than decoded wrongly. every chunk's CRC is verified.
 
 use std.types.size.usize;
+use std.types.string.str;
+use std.types.bool.bool;
+use O:   std.types.option;
 use std.memory.raw_copy;
 use std.memory.raw_equal;
+use A:   std.allocator;
+use FIX: std.allocator.fixed;
+use R:   std.types.result;
+use Z:   std.compress.inflate;
+use crc: std.crypto.hash.crc32;
+use adler: std.crypto.hash.adler32;
 use image.codec.Image;
 use image.codec.image_byte_len;
 use image.codec.COLORSPACE_SRGB;
@@ -47,26 +56,8 @@ val adam7_y_start: [7]u8 = [7]u8{0, 0, 4, 0, 2, 0, 1};
 val adam7_x_step:  [7]u8 = [7]u8{8, 8, 4, 4, 2, 2, 1};
 val adam7_y_step:  [7]u8 = [7]u8{8, 8, 8, 4, 4, 2, 2};
 
-# CRC-32 remainders for the low nibble, folding four bits per step
-val crc_nibbles: [16]u32 = [16]u32{
-    0x00000000, 0x1DB71064, 0x3B6E20C8, 0x26D930AC,
-    0x76DC4190, 0x6B6B51F4, 0x4DB26158, 0x5005713C,
-    0xEDB88320, 0xF00F9344, 0xD6D6A3E8, 0xCB61B38C,
-    0x9B64C2B0, 0x86D3D2D4, 0xA00AE278, 0xBDBDF21C
-};
-
-# the PNG chunk CRC: CRC-32/ISO-HDLC over the type and payload bytes
-fun crc32(p: *u8, len: usize) u32 {
-    var c: u32 = 0xFFFFFFFF;
-    var i: usize = 0;
-    for (i < len) {
-        c = c ^ (p[i]::u32);
-        c = (c >> 4) ^ crc_nibbles[(c & 0xF)::usize];
-        c = (c >> 4) ^ crc_nibbles[(c & 0xF)::usize];
-        i = i + 1;
-    }
-    ret c ^ 0xFFFFFFFF;
-}
+# scratch the inflate window needs, plus slack for the allocator's alignment
+val PNG_WINDOW_SCRATCH: usize = Z.WINDOW + 64;
 
 fun read_be32(p: *u8, off: usize) u32 {
     ret (p[off]::u32 << 24) | (p[off + 1]::u32 << 16) | (p[off + 2]::u32 << 8) | p[off + 3]::u32;
@@ -251,7 +242,7 @@ fun scan_chunks(src: *u8, src_len: usize, hdr: *PngHeader, out: *PngScan) Decode
 
         # the CRC covers the type field and the payload, not the length.
         val want: u32 = read_be32(src, off + 8 + dlen);
-        if (crc32(?src[off + 4], 4 + dlen) != want) { ret DECODE_CORRUPT; }
+        if (crc.hash(?src[off + 4], 4 + dlen) != want) { ret DECODE_CORRUPT; }
 
         val type_off: usize = off + 4;
         val data:     usize = off + 8;
@@ -634,9 +625,12 @@ pub fun png_info(src: *u8, src_len: usize, out: *Image) DecodeStatus {
 
 # scratch bytes png_decode needs for this image
 #
-# the scratch holds the zlib stream gathered from the IDAT chunks followed by
-# the decompressed raster. returns 0 when the header is unreadable or the size
-# is unrepresentable, so a 0 result is never a valid scratch size.
+# the scratch holds the inflate window followed by the decompressed raster, so
+# the decoder allocates nothing of its own: the window is bump-allocated out of
+# this buffer. the raster gets one byte more than it needs, which is what lets
+# an over-long zlib stream be caught rather than silently truncated. returns 0
+# when the header is unreadable or the size is unrepresentable, so a 0 result is
+# never a valid scratch size.
 # ---
 # src:     pointer to the encoded PNG bytes
 # src_len: number of bytes available at src
@@ -648,11 +642,193 @@ pub fun png_scratch_len(src: *u8, src_len: usize) usize {
 
     val raw: usize = raw_byte_len(?hdr);
     if (raw == 0) { ret 0; }
-    ret add_checked(scan.idat_total, raw);
+    val guarded: usize = add_checked(raw, 1);
+    if (guarded == 0) { ret 0; }
+    ret add_checked(PNG_WINDOW_SCRATCH, guarded);
+}
+
+# validate the two-byte zlib header PNG wraps its deflate data in
+#
+# PNG fixes the compression method at deflate with a window no larger than the
+# 32 KiB the decoder carries, and forbids a preset dictionary.
+fun check_zlib_header(cmf: u8, flg: u8) DecodeStatus {
+    if ((cmf & 0x0F) != 8) { ret DECODE_UNSUPPORTED; }
+    if ((cmf >> 4) > 7)    { ret DECODE_UNSUPPORTED; }
+    if ((flg & 0x20) != 0) { ret DECODE_UNSUPPORTED; }
+    # the two bytes together are a multiple of 31, which catches bit rot.
+    if ((cmf::u16 * 256 + flg::u16) % 31 != 0) { ret DECODE_CORRUPT; }
+    ret DECODE_OK;
+}
+
+# inflate the zlib stream spread across the IDAT chunks into dst
+#
+# the stream is one zlib member split at arbitrary points, so the chunk
+# boundaries mean nothing to the decompressor and each payload is fed straight
+# from the source buffer with no staging copy. the two-byte header and the
+# four-byte Adler-32 trailer may themselves straddle a boundary, so both are
+# accumulated a byte at a time. dst is one byte longer than the raster, so a
+# stream that produces too much fills it and is caught rather than truncated.
+fun inflate_idat(src: *u8, src_len: usize, z: *Z.Inflater, dst: *u8, dst_len: usize, raw_len: usize) DecodeStatus {
+    var hdr_bytes: [2]u8;
+    var trailer:   [4]u8;
+    var hdr_got:     usize = 0;
+    var trailer_got: usize = 0;
+    var produced:    usize = 0;
+    var done:        u8 = 0;
+
+    var off:       usize = PNG_SIG_LEN;
+    var seen_iend: u8 = 0;
+
+    for (seen_iend == 0) {
+        val dlen:     usize = read_be32(src, off)::usize;
+        val type_off: usize = off + 4;
+        val data:     usize = off + 8;
+
+        if (chunk_is(src, type_off, 'I', 'E', 'N', 'D') != 0) { seen_iend = 1; }
+        or (chunk_is(src, type_off, 'I', 'D', 'A', 'T') != 0) {
+            var pos: usize = 0;
+
+            for (hdr_got < 2 && pos < dlen) {
+                hdr_bytes[hdr_got] = src[data + pos];
+                hdr_got = hdr_got + 1;
+                pos     = pos + 1;
+                if (hdr_got == 2) {
+                    val hs: DecodeStatus = check_zlib_header(hdr_bytes[0], hdr_bytes[1]);
+                    if (hs != DECODE_OK) { ret hs; }
+                }
+            }
+
+            for (pos < dlen) {
+                # once the deflate data ends the rest of the stream is the trailer.
+                if (done != 0) {
+                    if (trailer_got < 4) {
+                        trailer[trailer_got] = src[data + pos];
+                        trailer_got = trailer_got + 1;
+                    }
+                    pos = pos + 1;
+                    cnt;
+                }
+
+                val res: R.Result[Z.Progress, str] =
+                    Z.decompress(z, ?src[data + pos], dlen - pos, ?dst[produced], dst_len - produced);
+                if (R.is_err[Z.Progress, str](res)) { ret DECODE_CORRUPT; }
+
+                val p: Z.Progress = R.unwrap_ok[Z.Progress, str](res);
+                pos      = pos + p.consumed;
+                produced = produced + p.written;
+
+                # dst carries a spare byte, so filling it means the stream
+                # decompresses to more than the header's dimensions allow.
+                if (p.status == Z.OUTPUT_FULL) { ret DECODE_CORRUPT; }
+
+                if (p.status == Z.DONE) {
+                    done = 1;
+                    # the decoder reads ahead, so trailer bytes may already be
+                    # sitting in its bit buffer; those come first.
+                    Z.align_to_byte(z);
+                    for (Z.buffered_bytes(z) > 0 && trailer_got < 4) {
+                        trailer[trailer_got] = Z.pop_buffered(z);
+                        trailer_got = trailer_got + 1;
+                    }
+                }
+            }
+        }
+
+        off = off + PNG_CHUNK_OVER + dlen;
+    }
+
+    if (hdr_got < 2) { ret DECODE_TRUNCATED; }
+    if (R.is_err[bool, str](Z.finish(z))) { ret DECODE_TRUNCATED; }
+    if (produced != raw_len)  { ret DECODE_CORRUPT; }
+    if (trailer_got < 4)      { ret DECODE_TRUNCATED; }
+
+    val want: u32 = read_be32(?trailer[0], 0);
+    if (adler.hash(dst, raw_len) != want) { ret DECODE_CORRUPT; }
+    ret DECODE_OK;
+}
+
+# decode a PNG into the caller-supplied RGBA8 buffer
+#
+# dst must be at least image_byte_len(width, height) bytes and scratch at least
+# png_scratch_len(src, src_len); both come from the caller, so the decode
+# allocates nothing and touches no OS interface. every chunk CRC and the zlib
+# stream's Adler-32 are verified, so a stream that decompresses to the wrong
+# length or fails its checksum is rejected rather than partially trusted.
+# ---
+# src:         pointer to the encoded PNG bytes
+# src_len:     number of bytes available at src
+# dst:         destination RGBA8 buffer
+# dst_len:     size of dst in bytes
+# scratch:     working buffer for the inflate window and the raster
+# scratch_len: size of scratch in bytes
+# out:         Image populated to describe the decoded pixels
+# ret:         DECODE_OK, or a DECODE_* error
+pub fun png_decode(src: *u8, src_len: usize, dst: *u8, dst_len: usize,
+                   scratch: *u8, scratch_len: usize, out: *Image) DecodeStatus {
+    if (out == nil) { ret DECODE_BAD_HEADER; }
+
+    var hdr:  PngHeader;
+    var scan: PngScan;
+    val st: DecodeStatus = scan_chunks(src, src_len, ?hdr, ?scan);
+    if (st != DECODE_OK) { ret st; }
+
+    if (dst == nil || scratch == nil) { ret DECODE_SHORT_BUFFER; }
+
+    val need: usize = image_byte_len(hdr.width, hdr.height);
+    if (dst_len < need) { ret DECODE_SHORT_BUFFER; }
+
+    val raw_len: usize = raw_byte_len(?hdr);
+    if (raw_len == 0) { ret DECODE_BAD_HEADER; }
+    if (scratch_len < PNG_WINDOW_SCRATCH + raw_len + 1) { ret DECODE_SHORT_BUFFER; }
+
+    # the inflate window is bump-allocated out of the head of the caller's
+    # scratch; the raster follows it.
+    var alloc: A.Allocator;
+    var fixed: FIX.FixedState;
+    val mk: O.Option[*u8] = FIX.make(?alloc, ?fixed, scratch, PNG_WINDOW_SCRATCH);
+    if (O.is_some[*u8](mk)) { ret DECODE_SHORT_BUFFER; }
+
+    val zres: R.Result[Z.Inflater, str] = Z.init(?alloc);
+    if (R.is_err[Z.Inflater, str](zres)) { ret DECODE_SHORT_BUFFER; }
+    var z: Z.Inflater = R.unwrap_ok[Z.Inflater, str](zres);
+
+    val raw: *u8 = ?scratch[PNG_WINDOW_SCRATCH];
+    val ist: DecodeStatus = inflate_idat(src, src_len, ?z, raw, raw_len + 1, raw_len);
+    Z.dnit(?z);
+    if (ist != DECODE_OK) { ret ist; }
+
+    var ctx: PngCtx;
+    ctx.color_type   = hdr.color_type;
+    ctx.depth        = hdr.depth;
+    ctx.has_trns     = scan.has_trns;
+    ctx.plte         = nil;
+    ctx.plte_entries = scan.plte_entries;
+    ctx.trns         = nil;
+    ctx.trns_len     = scan.trns_len;
+    if (scan.has_plte != 0) { ctx.plte = ?src[scan.plte_off]; }
+    if (scan.has_trns != 0) { ctx.trns = ?src[scan.trns_off]; }
+
+    val rst: DecodeStatus = decode_raster(?hdr, ?ctx, raw, raw_len, dst);
+    if (rst != DECODE_OK) { ret rst; }
+
+    var channels: u8 = 3;
+    if (hdr.color_type == PNG_COLOR_GRAY_ALPHA
+        || hdr.color_type == PNG_COLOR_RGBA
+        || scan.has_trns != 0) {
+        channels = 4;
+    }
+
+    out.pixels     = dst;
+    out.width      = hdr.width;
+    out.height     = hdr.height;
+    out.channels   = channels;
+    out.colorspace = COLORSPACE_SRGB;
+    ret DECODE_OK;
 }
 
 var png_raw: [256]u8;
 var png_pix: [256]u8;
+var png_work: [33280]u8;   # inflate window plus a small raster
 
 # fixture rasters below are the filtered scanline bytes a real encoder emits;
 # the expected pixels were produced by an independent PNG decoder.
@@ -995,21 +1171,72 @@ test "png: info enforces the chunk ordering rules" {
     if (png_info(?file_split_idat[0], 111, ?img) != DECODE_BAD_HEADER)  { ret 3; }
     # the same two chunks are fine when nothing breaks the run
     if (png_info(?file_two_idat[0], 96, ?img) != DECODE_OK)             { ret 4; }
-    if (png_scratch_len(?file_two_idat[0], 96) != 53)                   { ret 5; }
     ret 0;
 }
 
-test "png: scratch_len covers the zlib stream and the raster" {
-    if (png_scratch_len(?file_ok[0], 84) != 53) { ret 1; }
-    if (png_scratch_len(?file_bad_crc[0], 84) != 0) { ret 1; }
+test "png: scratch_len covers the window and the raster" {
+    # 4x2 RGB8 filters to 2 * (1 + 12) = 26 raster bytes, plus the spare byte
+    # that catches an over-long stream, on top of the inflate window.
+    if (png_scratch_len(?file_ok[0], 84) != PNG_WINDOW_SCRATCH + 27) { ret 1; }
+    if (png_scratch_len(?file_two_idat[0], 96) != PNG_WINDOW_SCRATCH + 27) { ret 2; }
+    if (png_scratch_len(?file_bad_crc[0], 84) != 0) { ret 3; }
     ret 0;
 }
 
-test "png: crc32 matches known values" {
+test "png: decode a whole file end to end" {
+    var img: Image;
+    val scratch_need: usize = png_scratch_len(?file_ok[0], 84);
+    if (scratch_need == 0 || scratch_need > 33280) { ret 1; }
+
+    if (png_decode(?file_ok[0], 84, ?png_pix[0], 256, ?png_work[0], 33280, ?img) != DECODE_OK) { ret 2; }
+    if (img.width != 4 || img.height != 2 || img.channels != 3) { ret 3; }
+    if (img.pixels != ?png_pix[0]) { ret 4; }
+
+    # the file stores 1..24 as two RGB8 scanlines, so every pixel is opaque
+    var i: usize = 0;
+    for (i < 8) {
+        if (png_pix[i * 4]     != (i * 3 + 1)::u8) { ret 5; }
+        if (png_pix[i * 4 + 1] != (i * 3 + 2)::u8) { ret 5; }
+        if (png_pix[i * 4 + 2] != (i * 3 + 3)::u8) { ret 5; }
+        if (png_pix[i * 4 + 3] != 255)             { ret 5; }
+        i = i + 1;
+    }
+    ret 0;
+}
+
+test "png: decode reassembles a zlib stream split across IDAT chunks" {
+    var img: Image;
+    if (png_decode(?file_two_idat[0], 96, ?png_pix[0], 256, ?png_work[0], 33280, ?img) != DECODE_OK) { ret 1; }
+    var i: usize = 0;
+    for (i < 8) {
+        if (png_pix[i * 4] != (i * 3 + 1)::u8) { ret 2; }
+        i = i + 1;
+    }
+    ret 0;
+}
+
+test "png: decode rejects short destination and scratch" {
+    var img: Image;
+    if (png_decode(?file_ok[0], 84, ?png_pix[0], 4, ?png_work[0], 33280, ?img) != DECODE_SHORT_BUFFER) { ret 1; }
+    if (png_decode(?file_ok[0], 84, ?png_pix[0], 256, ?png_work[0], 64, ?img) != DECODE_SHORT_BUFFER)  { ret 2; }
+    if (png_decode(?file_ok[0], 84, nil, 256, ?png_work[0], 33280, ?img) != DECODE_SHORT_BUFFER)       { ret 3; }
+    ret 0;
+}
+
+test "png: decode rejects a corrupted zlib stream" {
+    var img: Image;
+    # flip a byte inside the IDAT payload, leaving the chunk CRC to catch it
+    raw_copy(?png_raw[0], ?file_ok[0], 84);
+    png_raw[45] = png_raw[45] ^ 0xFF;
+    if (png_decode(?png_raw[0], 84, ?png_pix[0], 256, ?png_work[0], 33280, ?img) != DECODE_CORRUPT) { ret 1; }
+    ret 0;
+}
+
+test "png: chunk crc matches known values" {
     var ihdr: [4]u8 = [4]u8{'I', 'H', 'D', 'R'};
-    if (crc32(?ihdr[0], 4) != 0xA8A1AE0A) { ret 1; }
+    if (crc.hash(?ihdr[0], 4) != 0xA8A1AE0A) { ret 1; }
     var iend: [4]u8 = [4]u8{'I', 'E', 'N', 'D'};
-    if (crc32(?iend[0], 4) != 0xAE426082) { ret 1; }
+    if (crc.hash(?iend[0], 4) != 0xAE426082) { ret 1; }
     ret 0;
 }
 
