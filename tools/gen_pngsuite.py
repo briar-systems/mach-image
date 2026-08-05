@@ -103,9 +103,8 @@ def classify(data: bytes) -> Verdict:
     every chunk's CRC (a bad CRC anywhere -- not just in IHDR -- fails the
     whole file, since a decoder cannot trust framing past a corrupt chunk),
     then the structural rules (IHDR first, PLTE/tRNS before IDAT, IDAT
-    contiguous, IEND terminates the stream, and at least one IDAT). a well-formed file with a
-    valid but sub-byte bit depth (1, 2, 4) is DECODE_UNSUPPORTED before any
-    later chunk is even inspected -- this decoder's documented scope.
+    contiguous, IEND terminates the stream, and at least one IDAT). every
+    spec-defined bit depth is accepted.
     """
     if len(data) < 8:
         return Verdict("DECODE_TRUNCATED")
@@ -155,8 +154,6 @@ def classify(data: bytes) -> Verdict:
                 return Verdict("DECODE_BAD_HEADER")
             if comp != 0 or filt != 0 or inter not in (0, 1):
                 return Verdict("DECODE_BAD_HEADER")
-            if depth not in (8, 16):
-                return Verdict("DECODE_UNSUPPORTED")
             hdr = dict(width=w, height=h, depth=depth, color_type=ct, interlace=inter)
             seen_ihdr = True
         elif not seen_ihdr:
@@ -260,7 +257,7 @@ def decode_rgba8(data: bytes, hdr: dict, plte: bytes, trns) -> bytes:
     """the RGBA8 raster png_decode is expected to produce for a well-formed file."""
     w, h, depth, ct, inter = hdr["width"], hdr["height"], hdr["depth"], hdr["color_type"], hdr["interlace"]
     channels = COLOR_CHANNELS[ct]
-    bpp = channels * (depth // 8)
+    bpp = max(1, (channels * depth + 7) // 8)
     idat = b"".join(p for t, p in walk_chunks(data) if t == b"IDAT")
     raw = zlib.decompress(idat)
 
@@ -274,39 +271,48 @@ def decode_rgba8(data: bytes, hdr: dict, plte: bytes, trns) -> bytes:
         elif ct == 2:
             trns_key = tuple(v & mask for v in struct.unpack(">HHH", trns[0:6]))
 
-    def emit(sample: bytes, x: int, y: int):
+    mask = (1 << depth) - 1
+
+    def source_sample(row: bytes, bit_off: int, i: int) -> int:
+        at = bit_off + i * depth
+        if depth < 8:
+            return (row[at // 8] >> (8 - depth - (at & 7))) & mask
+        if depth == 8:
+            return row[at // 8]
+        return (row[at // 8] << 8) | row[at // 8 + 1]
+
+    def sample8(sample: int) -> int:
+        if depth == 16:
+            return sample >> 8
+        if depth == 8:
+            return sample
+        return sample * 255 // mask
+
+    def emit(row: bytes, bit_off: int, x: int, y: int):
         base = (y * w + x) * 4
         if ct == 0:
-            full = sample[0] if depth == 8 else (sample[0] << 8) | sample[1]
-            g = sample[0]
+            full = source_sample(row, bit_off, 0)
+            g = sample8(full)
             a = 0 if (trns_key is not None and full == trns_key) else 255
             out[base:base + 4] = bytes((g, g, g, a))
         elif ct == 2:
-            if depth == 8:
-                r, g, b = sample[0], sample[1], sample[2]
-                full = (r, g, b)
-            else:
-                r, g, b = sample[0], sample[2], sample[4]
-                full = (
-                    (sample[0] << 8) | sample[1],
-                    (sample[2] << 8) | sample[3],
-                    (sample[4] << 8) | sample[5],
-                )
+            full = tuple(source_sample(row, bit_off, i) for i in range(3))
+            r, g, b = (sample8(v) for v in full)
             a = 0 if (trns_key is not None and full == trns_key) else 255
             out[base:base + 4] = bytes((r, g, b, a))
         elif ct == 3:
-            idx = sample[0]
+            idx = source_sample(row, bit_off, 0)
             r, g, b = plte[idx * 3], plte[idx * 3 + 1], plte[idx * 3 + 2]
             a = trns[idx] if (trns is not None and idx < len(trns)) else 255
             out[base:base + 4] = bytes((r, g, b, a))
         elif ct == 4:
-            g, a = (sample[0], sample[1]) if depth == 8 else (sample[0], sample[2])
+            g = sample8(source_sample(row, bit_off, 0))
+            a = sample8(source_sample(row, bit_off, 1))
             out[base:base + 4] = bytes((g, g, g, a))
         else:
-            if depth == 8:
-                r, g, b, a = sample[0], sample[1], sample[2], sample[3]
-            else:
-                r, g, b, a = sample[0], sample[2], sample[4], sample[6]
+            r, g, b, a = (
+                sample8(source_sample(row, bit_off, i)) for i in range(4)
+            )
             out[base:base + 4] = bytes((r, g, b, a))
 
     if inter == 0:
@@ -325,14 +331,14 @@ def decode_rgba8(data: bytes, hdr: dict, plte: bytes, trns) -> bytes:
     for x_start, y_start, x_step, y_step, pw, ph in passes:
         if pw == 0 or ph == 0:
             continue
-        row_bytes = pw * bpp
+        row_bytes = (pw * channels * depth + 7) // 8
         prev = None
         for row in range(ph):
             ftype = raw[off]
             cur = unfilter(ftype, raw[off + 1:off + 1 + row_bytes], prev, bpp)
             y = y_start + row * y_step
             for col in range(pw):
-                emit(cur[col * bpp:(col + 1) * bpp], x_start + col * x_step, y)
+                emit(cur, col * channels * depth, x_start + col * x_step, y)
             prev = cur
             off += 1 + row_bytes
 
@@ -357,11 +363,14 @@ def pil_rgba8(path: str, hdr: dict, trns_key) -> bytes:
 
     if ct == 0:
         im2 = im.convert("I") if depth == 16 else im.convert("L")
+        key = trns_key
+        if key is not None and depth < 8:
+            key = key * 255 // ((1 << depth) - 1)
         for y in range(h):
             for x in range(w):
                 v = im2.getpixel((x, y))
                 g = (v >> 8) & 0xFF if depth == 16 else v
-                a = 0 if (trns_key is not None and v == trns_key) else 255
+                a = 0 if (key is not None and v == key) else 255
                 px[(y * w + x) * 4:(y * w + x) * 4 + 4] = bytes((g, g, g, a))
     elif ct == 2:
         im2 = im.convert("RGB")
@@ -488,11 +497,16 @@ def build(corpus_dir: str) -> str:
         entries.append((filename, filename[:-4], mach_name(filename), data, verdict))
 
     decodable = []   # (name, data, verdict, hash)
+    corrupt_rasters = []   # (name, data), valid framing but corrupt image data
     for filename, stem, name, data, verdict in entries:
         if verdict.status != "DECODE_OK":
             continue
         path = os.path.join(corpus_dir, filename)
-        pixels = decode_rgba8(data, verdict.hdr, verdict.plte, verdict.trns)
+        try:
+            pixels = decode_rgba8(data, verdict.hdr, verdict.plte, verdict.trns)
+        except zlib.error:
+            corrupt_rasters.append((name, data))
+            continue
         verify(path, verdict, pixels)
         decodable.append((name, data, verdict, fnv1a64(pixels)))
 
@@ -520,6 +534,19 @@ def build(corpus_dir: str) -> str:
             out.append(
                 "    if (expect_info(?%s[0], %d, %s, %d, %d, %d) == 0) { ret %d; }"
                 % (name, len(data), verdict.status, w, h, ch, i)
+            )
+        out.append("    ret 0;")
+        out.append("}")
+
+    if corrupt_rasters:
+        out.append("")
+        out.append('test "pngsuite: corrupt image data is rejected" {')
+        out.append("    var img: Image;")
+        for i, (name, data) in enumerate(corrupt_rasters, start=1):
+            out.append(
+                "    if (png_decode(?%s[0], %d, ?suite_pix[0], 262144, "
+                "?suite_scratch[0], 262144, ?img) != DECODE_CORRUPT) { ret %d; }"
+                % (name, len(data), i)
             )
         out.append("    ret 0;")
         out.append("}")
@@ -572,16 +599,14 @@ HEADER = '''
 #
 # expectations are derived from the PNG spec and each file's documented
 # defect, never by running the decoder and recording its output: a
-# well-formed file with bit depth 1, 2, or 4 is DECODE_UNSUPPORTED (valid PNG
-# this decoder deliberately does not unpack); a well-formed file with depth 8
-# or 16 is DECODE_OK, with channels 4 when the color type is 4 or 6 or a tRNS
-# chunk is present, else 3. the deliberately-corrupt "x*" files are rejected
+# well-formed file at any spec-defined bit depth is DECODE_OK, with channels 4
+# when the color type is 4 or 6 or a tRNS chunk is present, else 3. the
+# deliberately-corrupt "x*" files are rejected
 # per their documented defect: a bad signature byte is DECODE_BAD_MAGIC, a bad
 # chunk CRC is DECODE_CORRUPT, and an undefined color type or bit depth, or a
-# missing IDAT chunk, is DECODE_BAD_HEADER. two of the corrupt files
-# (xcsn0g01, a bad IDAT checksum; xdtn0g01, a missing IDAT chunk) use bit
-# depth 1, so png_info rejects them as DECODE_UNSUPPORTED while parsing IHDR,
-# before the chunk walk ever reaches the defect their name documents.
+# missing IDAT chunk, is DECODE_BAD_HEADER. xcsn0g01's bad IDAT chunk CRC is
+# DECODE_CORRUPT and xdtn0g01's missing IDAT is DECODE_BAD_HEADER; both now
+# reach their documented defect instead of stopping at the old depth gate.
 #
 # pngsuite_hashes is an FNV-1a 64 table (offset basis 14695981039346656037,
 # prime 1099511628211, folded one byte at a time -- see
