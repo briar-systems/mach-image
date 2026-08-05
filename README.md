@@ -47,9 +47,8 @@ approximate pixels, so an unsupported configuration is always a typed
     slice for the codec surface.
   - **TGA** — next: uncompressed and RLE variants, still no external
     dependencies.
-  - **PNG** — after TGA. PNG decoding needs DEFLATE, so it is **blocked on
-    `inflate` landing in [mach-std](https://github.com/briar-systems/mach-std)**;
-    the codec lands once that dependency is available.
+  - **PNG** — third: 8- and 16-bit decoding across every color type, backed by
+    mach-std's DEFLATE implementation and the PngSuite corpus.
   - **JPEG** — later, once the lossless formats are solid.
 - Encoders for at least **QOI** and **PNG**, sized for tooling use
   (screenshots, generated assets) rather than exhaustive option coverage.
