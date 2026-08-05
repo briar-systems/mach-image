@@ -773,6 +773,35 @@ var file_huge: [66]u8 = [66]u8{
     255, 255, 16, 6, 0, 0, 0, 68, 89, 215, 37, 0, 0, 0, 9, 73, 68, 65, 84, 120, 218, 99, 0, 0,
     0, 1, 0, 1, 177, 13, 182, 147, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130
 };
+# chunk-ordering cases the corpus cannot reach: PngSuite's missing-IDAT and
+# bad-IDAT-CRC files are both 1-bit, so they are rejected as an unsupported
+# depth long before the defect their names describe is read.
+var file_no_idat: [45]u8 = [45]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 4, 0, 0, 0, 2, 8, 2,
+    0, 0, 0, 240, 202, 234, 52, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130
+};
+var file_idat_bad_crc: [84]u8 = [84]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 4, 0, 0, 0, 2, 8, 2,
+    0, 0, 0, 240, 202, 234, 52, 0, 0, 0, 27, 73, 68, 65, 84, 120, 218, 99, 96, 100, 98, 102,
+    97, 101, 99, 231, 224, 228, 226, 230, 97, 228, 229, 227, 103, 134, 1, 0, 7, 220, 0, 149,
+    25, 178, 177, 27, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130
+};
+# one zlib stream over two IDAT chunks, split by a tEXt chunk
+var file_split_idat: [111]u8 = [111]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 4, 0, 0, 0, 2, 8, 2,
+    0, 0, 0, 240, 202, 234, 52, 0, 0, 0, 13, 73, 68, 65, 84, 120, 218, 99, 96, 100, 98, 102,
+    97, 101, 99, 231, 224, 228, 153, 32, 169, 225, 0, 0, 0, 3, 116, 69, 88, 116, 107, 0, 118,
+    203, 4, 243, 144, 0, 0, 0, 14, 73, 68, 65, 84, 226, 230, 97, 228, 229, 227, 103, 134, 1, 0,
+    7, 220, 0, 149, 250, 106, 58, 131, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130
+};
+# the same two IDAT chunks left consecutive
+var file_two_idat: [96]u8 = [96]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 4, 0, 0, 0, 2, 8, 2,
+    0, 0, 0, 240, 202, 234, 52, 0, 0, 0, 13, 73, 68, 65, 84, 120, 218, 99, 96, 100, 98, 102,
+    97, 101, 99, 231, 224, 228, 153, 32, 169, 225, 0, 0, 0, 14, 73, 68, 65, 84, 226, 230, 97,
+    228, 229, 227, 103, 134, 1, 0, 7, 220, 0, 149, 250, 106, 58, 131, 0, 0, 0, 0, 73, 69, 78,
+    68, 174, 66, 96, 130
+};
 var file_zerodim: [66]u8 = [66]u8{
     137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 0, 0, 0, 0, 2, 8, 2,
     0, 0, 0, 249, 33, 74, 78, 0, 0, 0, 9, 73, 68, 65, 84, 120, 218, 99, 0, 0, 0, 1, 0, 1, 177,
@@ -956,6 +985,17 @@ test "png: info rejects dimensions whose raster overflows" {
     var img: Image;
     if (png_info(?file_huge[0], 66, ?img) != DECODE_BAD_HEADER) { ret 1; }
     if (png_scratch_len(?file_huge[0], 66) != 0) { ret 1; }
+    ret 0;
+}
+
+test "png: info enforces the chunk ordering rules" {
+    var img: Image;
+    if (png_info(?file_no_idat[0], 45, ?img) != DECODE_BAD_HEADER)      { ret 1; }
+    if (png_info(?file_idat_bad_crc[0], 84, ?img) != DECODE_CORRUPT)    { ret 2; }
+    if (png_info(?file_split_idat[0], 111, ?img) != DECODE_BAD_HEADER)  { ret 3; }
+    # the same two chunks are fine when nothing breaks the run
+    if (png_info(?file_two_idat[0], 96, ?img) != DECODE_OK)             { ret 4; }
+    if (png_scratch_len(?file_two_idat[0], 96) != 53)                   { ret 5; }
     ret 0;
 }
 
