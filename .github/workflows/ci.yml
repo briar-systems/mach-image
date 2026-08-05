@@ -12,7 +12,7 @@ jobs:
     name: Test Suite
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Fetch released mach
         env:
@@ -28,6 +28,9 @@ jobs:
 
       - name: Sync dependencies
         run: mach dep pull
+
+      - name: Verify PNG encoder golden
+        run: python3 tools/verify_png_encoder.py
 
       # pure mach: no C, no system libs, no display — the algorithms link nothing.
       - name: Build

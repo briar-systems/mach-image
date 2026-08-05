@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- png: Deterministic, allocation-free RGBA8 encoding with filter-0 scanlines
+  and stored DEFLATE blocks.
+
 ### Changed
 - manifest: Re-touched to RFC-exact totality per mach#1964/mach#1979.
 

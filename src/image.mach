@@ -50,6 +50,8 @@ fwd tga.tga_encode_bound;
 fwd png.png_info;
 fwd png.png_decode;
 fwd png.png_scratch_len;
+fwd png.png_encode;
+fwd png.png_encode_bound;
 fwd png.PNG_SIGNATURE;
 fwd png.PNG_COLOR_GRAY;
 fwd png.PNG_COLOR_RGB;
