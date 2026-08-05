@@ -27,6 +27,19 @@ Decode and encode the raster image formats the engine and tooling actually
 need. Decoders are the priority; encoding covers the formats used to emit
 images from the toolchain (screenshots, generated assets).
 
+## Formats
+
+| Format | Decode | Encode | Notes |
+|---|---|---|---|
+| QOI | all chunk types | yes | spec-complete, round-trips |
+| TGA | truecolor types 2 and 10, 24- and 32-bit | 32-bit uncompressed | color-mapped and grayscale variants are rejected, not decoded |
+| PNG | bit depths 8 and 16 across all five color types, filters 0-4, Adam7 interlace, tRNS | — | sub-byte depths (1, 2, 4) are rejected as unsupported; every chunk CRC is validated |
+| JPEG | — | — | not started |
+
+A decoder rejects a variant it does not implement rather than producing
+approximate pixels, so an unsupported configuration is always a typed
+`DecodeStatus` and never silent corruption.
+
 ## Goals
 
 - Decoders, in priority order:
@@ -71,6 +84,8 @@ src/
   codec.mach    the shared Image type, colorspace hints, size and status helpers
   qoi.mach      QOI decoder and encoder
   tga.mach      TGA truecolor decoder (types 2 and 10) and a minimal encoder
+  png.mach      PNG decoder: chunk framing, defilter, Adam7, RGBA8 normalization
+  pngsuite.mach the embedded PngSuite corpus and the tests that run it
 ```
 
 `codec.mach` defines the library's common currency: an `Image` is an RGBA8

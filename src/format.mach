@@ -25,6 +25,9 @@ pub fun format_name(format: u8) str {
     ret "unknown";
 }
 
+# the fixed 8-byte signature every PNG file opens with
+val png_signature: [8]u8 = [8]u8{137, 80, 78, 71, 13, 10, 26, 10};
+
 # the 18-byte signature of a TGA 2.0 file footer
 val tga_footer_signature: [18]u8 = [18]u8{
     'T', 'R', 'U', 'E', 'V', 'I', 'S', 'I', 'O', 'N',
@@ -62,10 +65,10 @@ fun looks_like_tga(src: *u8, src_len: usize) u8 {
 
 # best-effort identification of an image format from its leading bytes
 #
-# QOI is identified by its "qoif" magic. TGA has no magic, so it is recognized
-# heuristically (footer signature or plausible header) and may match a variant
-# the TGA decoder does not support; detection names the container, not
-# decodability. returns FORMAT_UNKNOWN when nothing matches.
+# QOI and PNG are identified by their magic. TGA has no magic, so it is
+# recognized heuristically (footer signature or plausible header) and may match
+# a variant the TGA decoder does not support; detection names the container, not
+# decodability, so it is tried last. returns FORMAT_UNKNOWN when nothing matches.
 # ---
 # src:     pointer to the leading bytes of the encoded image
 # src_len: number of bytes available at src
@@ -74,6 +77,15 @@ pub fun detect(src: *u8, src_len: usize) u8 {
     if (src == nil) { ret FORMAT_UNKNOWN; }
     if (src_len >= 4 && src[0] == 'q' && src[1] == 'o' && src[2] == 'i' && src[3] == 'f') {
         ret FORMAT_QOI;
+    }
+    if (src_len >= 8) {
+        var i: usize = 0;
+        var png_ok: u8 = 1;
+        for (i < 8) {
+            if (src[i] != png_signature[i]) { png_ok = 0; }
+            i = i + 1;
+        }
+        if (png_ok == 1) { ret FORMAT_PNG; }
     }
     if (looks_like_tga(src, src_len) == 1) { ret FORMAT_TGA; }
     ret FORMAT_UNKNOWN;
@@ -105,6 +117,15 @@ test "format: detect tga by header heuristic" {
     buf[2]  = 2;   # image_type: uncompressed truecolor
     buf[16] = 32;  # pixel depth
     if (detect(?buf[0], 18) != FORMAT_TGA) { ret 1; }
+    ret 0;
+}
+
+test "format: detect png signature" {
+    var buf: [8]u8 = [8]u8{137, 80, 78, 71, 13, 10, 26, 10};
+    if (detect(?buf[0], 8) != FORMAT_PNG) { ret 1; }
+    # a signature the transfer-corruption check is meant to catch is not a PNG
+    buf[2] = 0;
+    if (detect(?buf[0], 8) == FORMAT_PNG) { ret 1; }
     ret 0;
 }
 
