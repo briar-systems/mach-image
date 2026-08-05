@@ -974,7 +974,8 @@ pub fun png_encode_bound(width: u32, height: u32) usize {
 # caller owns both the source pixels and destination. dst must be at least
 # png_encode_bound(width, height) bytes; a shorter buffer is left untouched.
 # ---
-# img:     image whose pixels hold width*height*4 RGBA8 bytes
+# img:     image whose pixels hold width*height*4 RGBA8 bytes; channels must be
+#          3 or 4, while the informational colorspace hint is not stored
 # dst:     destination buffer for the PNG file
 # dst_len: size of dst in bytes
 # ret:     bytes written, or 0 on invalid input or a short buffer
@@ -1756,7 +1757,8 @@ test "png: encode then decode round-trips RGBA8" {
 
     var info: Image;
     if (png_info(?png_enc[0], n, ?info) != DECODE_OK) { ret 3; }
-    if (info.width != w || info.height != h || info.channels != 4) { ret 4; }
+    if (info.width != w || info.height != h || info.channels != 4
+        || info.colorspace != COLORSPACE_SRGB) { ret 4; }
 
     val scratch: usize = png_scratch_len(?png_enc[0], n);
     if (scratch == 0 || scratch > 33280) { ret 5; }

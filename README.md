@@ -104,6 +104,8 @@ The PNG writer sizes caller-owned storage with
 noninterlaced scanlines using filter 0, wrapped in a zlib stream of stored
 DEFLATE blocks. This keeps the first encoder allocation-free and dependency-free
 at the cost of compression; a future compressor can fit behind the same API.
+The informational `Image.colorspace` hint is not serialized because this subset
+has no ancillary color-management chunks, and pixel bytes are never converted.
 
 ## Tests
 
