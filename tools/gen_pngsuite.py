@@ -154,7 +154,9 @@ def classify(data: bytes) -> Verdict:
         elif not seen_ihdr:
             return Verdict("DECODE_BAD_HEADER")
         elif ctype == b"PLTE":
-            if has_plte or seen_idat or dlen == 0 or dlen % 3 != 0:
+            if has_plte or has_trns or seen_idat or dlen == 0 or dlen % 3 != 0:
+                return Verdict("DECODE_BAD_HEADER")
+            if hdr["color_type"] in (0, 4):
                 return Verdict("DECODE_BAD_HEADER")
             entries = dlen // 3
             if entries > 256:
@@ -186,6 +188,8 @@ def classify(data: bytes) -> Verdict:
                 return Verdict("DECODE_BAD_HEADER")
             seen_iend = True
         else:
+            if not (ctype[0] & 0x20):
+                return Verdict("DECODE_UNSUPPORTED")
             idat_done = seen_idat
 
         off += 12 + dlen

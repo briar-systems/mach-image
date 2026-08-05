@@ -181,8 +181,9 @@ fun parse_ihdr(src: *u8, data: usize, out: *PngHeader) DecodeStatus {
     val filter:      u8  = src[data + 11];
     val interlace:   u8  = src[data + 12];
 
-    if (width == 0 || height == 0)             { ret DECODE_BAD_HEADER; }
-    if (width > 0x7FFFFFFF || height > 0x7FFFFFFF) { ret DECODE_BAD_HEADER; }
+    if (width == 0 || height == 0 || width > 0x7FFFFFFF || height > 0x7FFFFFFF) {
+        ret DECODE_BAD_HEADER;
+    }
 
     val channels: u8 = color_type_channels(color_type);
     if (channels == 0)                         { ret DECODE_BAD_HEADER; }
@@ -214,8 +215,9 @@ fun parse_ihdr(src: *u8, data: usize, out: *PngHeader) DecodeStatus {
 #
 # doubles as a whole-file integrity check: every chunk's CRC is verified, and
 # the ordering rules the decoder depends on (IHDR first, PLTE and tRNS before
-# the image data, IDAT consecutive, IEND last) are enforced. ancillary chunks
-# the decoder does not read are skipped.
+# the image data, IDAT consecutive, IEND last) are enforced. unknown ancillary
+# chunks are skipped; an unknown critical chunk is unsupported because its
+# effect on the decoded image cannot be known.
 fun scan_chunks(src: *u8, src_len: usize, hdr: *PngHeader, out: *PngScan) DecodeStatus {
     if (src == nil)         { ret DECODE_BAD_HEADER; }
     if (src_len < PNG_SIG_LEN) { ret DECODE_TRUNCATED; }
@@ -267,7 +269,12 @@ fun scan_chunks(src: *u8, src_len: usize, hdr: *PngHeader, out: *PngScan) Decode
             ret DECODE_BAD_HEADER;
         }
         or (chunk_is(src, type_off, 'P', 'L', 'T', 'E') != 0) {
-            if (out.has_plte != 0 || seen_idat != 0) { ret DECODE_BAD_HEADER; }
+            if (out.has_plte != 0 || out.has_trns != 0 || seen_idat != 0) {
+                ret DECODE_BAD_HEADER;
+            }
+            if (hdr.color_type == PNG_COLOR_GRAY || hdr.color_type == PNG_COLOR_GRAY_ALPHA) {
+                ret DECODE_BAD_HEADER;
+            }
             if (dlen == 0 || dlen % 3 != 0)          { ret DECODE_BAD_HEADER; }
             # 256 is also the depth-8 index ceiling, the only depth a palette
             # reaches here: parse_ihdr has already turned 1/2/4 away.
@@ -313,6 +320,9 @@ fun scan_chunks(src: *u8, src_len: usize, hdr: *PngHeader, out: *PngScan) Decode
             seen_iend = 1;
         }
         or {
+            # bit 5 of the first type byte distinguishes ancillary chunks from
+            # critical ones. only the former are safe to ignore.
+            if ((src[type_off] & 0x20) == 0) { ret DECODE_UNSUPPORTED; }
             idat_done = seen_idat;
         }
 
@@ -901,6 +911,35 @@ var file_bad_crc: [84]u8 = [84]u8{
     97, 101, 99, 231, 224, 228, 226, 230, 97, 228, 229, 227, 103, 134, 1, 0, 7, 220, 0, 149,
     24, 178, 177, 27, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130
 };
+# valid zero-length private chunks inserted between IHDR and IDAT; the first is
+# critical and cannot be interpreted, while the second is ancillary and safe
+# to skip.
+var file_unknown_critical: [79]u8 = [79]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+    8, 0, 0, 0, 0, 58, 126, 155, 85, 0, 0, 0, 0, 65, 66, 67, 68, 219, 23, 32, 165, 0, 0, 0,
+    10, 73, 68, 65, 84, 120, 156, 99, 208, 2, 0, 0, 44, 0, 43, 204, 122, 232, 230, 0, 0, 0, 0, 73,
+    69, 78, 68, 174, 66, 96, 130
+};
+var file_unknown_ancillary: [79]u8 = [79]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+    8, 0, 0, 0, 0, 58, 126, 155, 85, 0, 0, 0, 0, 97, 66, 67, 68, 123, 37, 143, 155, 0, 0, 0,
+    10, 73, 68, 65, 84, 120, 156, 99, 208, 2, 0, 0, 44, 0, 43, 204, 122, 232, 230, 0, 0, 0, 0, 73,
+    69, 78, 68, 174, 66, 96, 130
+};
+# PLTE is forbidden for grayscale, and when present must precede tRNS.
+var file_gray_plte: [82]u8 = [82]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+    8, 0, 0, 0, 0, 58, 126, 155, 85, 0, 0, 0, 3, 80, 76, 84, 69, 1, 2, 3, 13, 135, 100, 213,
+    0, 0, 0, 10, 73, 68, 65, 84, 120, 156, 99, 208, 2, 0, 0, 44, 0, 43, 204, 122, 232, 230, 0, 0,
+    0, 0, 73, 69, 78, 68, 174, 66, 96, 130
+};
+var file_trns_before_plte: [102]u8 = [102]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+    8, 2, 0, 0, 0, 144, 119, 83, 222, 0, 0, 0, 6, 116, 82, 78, 83, 0, 1, 0, 2, 0, 3, 201,
+    75, 171, 245, 0, 0, 0, 3, 80, 76, 84, 69, 1, 2, 3, 13, 135, 100, 213, 0, 0, 0, 12, 73, 68,
+    65, 84, 120, 156, 99, 96, 100, 98, 6, 0, 0, 14, 0, 7, 215, 111, 228, 120, 0, 0, 0, 0, 73, 69,
+    78, 68, 174, 66, 96, 130
+};
 var file_gray1: [69]u8 = [69]u8{
     137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 4, 0, 0, 0, 2, 1, 0,
     0, 0, 0, 87, 211, 64, 206, 0, 0, 0, 12, 73, 68, 65, 84, 120, 218, 99, 216, 192, 224, 1, 0,
@@ -1121,6 +1160,24 @@ test "png: info rejects a bad signature" {
 test "png: info rejects a bad chunk crc" {
     var img: Image;
     if (png_info(?file_bad_crc[0], 84, ?img) != DECODE_CORRUPT) { ret 1; }
+    ret 0;
+}
+
+test "png: unknown chunks honor the critical bit" {
+    var img: Image;
+    if (png_info(?file_unknown_critical[0], 79, ?img) != DECODE_UNSUPPORTED) { ret 1; }
+    if (png_scratch_len(?file_unknown_critical[0], 79) != 0)                { ret 2; }
+    if (png_info(?file_unknown_ancillary[0], 79, ?img) != DECODE_OK)        { ret 3; }
+    if (png_decode(?file_unknown_ancillary[0], 79, ?png_pix[0], 256,
+                   ?png_work[0], 33280, ?img) != DECODE_OK)                 { ret 4; }
+    if (png_pix[0] != 42 || png_pix[1] != 42 || png_pix[2] != 42 || png_pix[3] != 255) { ret 5; }
+    ret 0;
+}
+
+test "png: info enforces PLTE placement and color types" {
+    var img: Image;
+    if (png_info(?file_gray_plte[0], 82, ?img) != DECODE_BAD_HEADER)       { ret 1; }
+    if (png_info(?file_trns_before_plte[0], 102, ?img) != DECODE_BAD_HEADER) { ret 2; }
     ret 0;
 }
 
