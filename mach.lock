@@ -2,5 +2,5 @@
 
 [dep.mach-std]
 url = "https://github.com/briar-systems/mach-std"
-ref = "branch/feat/inflate"
-commit = "17498ade6c48b3d81b32ed3a9120cf283fe9531a"
+ref = "branch/main"
+commit = "c500b97631ada14579eb29f305f780c961d8ee0a"
