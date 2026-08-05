@@ -3,4 +3,4 @@
 [dep.mach-std]
 url = "https://github.com/briar-systems/mach-std"
 ref = "branch/feat/inflate"
-commit = "afb83274936ccd26847db001d3631bd0fef7fbc6"
+commit = "17498ade6c48b3d81b32ed3a9120cf283fe9531a"

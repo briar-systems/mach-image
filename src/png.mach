@@ -59,11 +59,13 @@ val adam7_y_start: [7]u8 = [7]u8{0, 0, 4, 0, 2, 0, 1};
 val adam7_x_step:  [7]u8 = [7]u8{8, 8, 4, 4, 2, 2, 1};
 val adam7_y_step:  [7]u8 = [7]u8{8, 8, 8, 4, 4, 2, 2};
 
-# scratch the sliding window needs, plus slack for the allocator's alignment
+# scratch the sliding window needs, which heads the caller's buffer
 #
-# a zlib Decompressor wraps an Inflater and makes that one window allocation and
-# nothing else, so the inflate layer's constant is the whole budget.
-val PNG_WINDOW_SCRATCH: usize = Z.WINDOW + 64;
+# a zlib Decompressor wraps an Inflater and makes that one allocation and
+# nothing else, and the window allocates as u8, so alignment costs nothing and
+# the figure is exact rather than a lower bound. mach-std pins that with a test
+# asserting one byte less is refused.
+val PNG_WINDOW_SCRATCH: usize = Z.WINDOW;
 
 fun read_be32(p: *u8, off: usize) u32 {
     ret (p[off]::u32 << 24) | (p[off + 1]::u32 << 16) | (p[off + 2]::u32 << 8) | p[off + 3]::u32;
@@ -1206,6 +1208,13 @@ test "png: decode rejects short destination and scratch" {
     if (png_decode(?file_ok[0], 84, ?png_pix[0], 4, ?png_work[0], 33280, ?img) != DECODE_SHORT_BUFFER) { ret 1; }
     if (png_decode(?file_ok[0], 84, ?png_pix[0], 256, ?png_work[0], 64, ?img) != DECODE_SHORT_BUFFER)  { ret 2; }
     if (png_decode(?file_ok[0], 84, nil, 256, ?png_work[0], 33280, ?img) != DECODE_SHORT_BUFFER)       { ret 3; }
+
+    # png_scratch_len is exact, not a lower bound: one byte less must be refused
+    # and exactly that many must succeed.
+    val need: usize = png_scratch_len(?file_ok[0], 84);
+    if (need == 0 || need > 33280) { ret 4; }
+    if (png_decode(?file_ok[0], 84, ?png_pix[0], 256, ?png_work[0], need - 1, ?img) != DECODE_SHORT_BUFFER) { ret 5; }
+    if (png_decode(?file_ok[0], 84, ?png_pix[0], 256, ?png_work[0], need, ?img) != DECODE_OK)               { ret 6; }
     ret 0;
 }
 
