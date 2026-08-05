@@ -29,6 +29,9 @@ jobs:
       - name: Sync dependencies
         run: mach dep pull
 
+      - name: Verify PNG encoder golden
+        run: python3 tools/verify_png_encoder.py
+
       # pure mach: no C, no system libs, no display — the algorithms link nothing.
       - name: Build
         run: mach build .
