@@ -260,10 +260,11 @@ def decode_rgba8(data: bytes, hdr: dict, plte: bytes, trns) -> bytes:
 
     trns_key = None
     if trns is not None:
+        mask = (1 << depth) - 1
         if ct == 0:
-            trns_key = struct.unpack(">H", trns[0:2])[0]
+            trns_key = struct.unpack(">H", trns[0:2])[0] & mask
         elif ct == 2:
-            trns_key = struct.unpack(">HHH", trns[0:6])
+            trns_key = tuple(v & mask for v in struct.unpack(">HHH", trns[0:6]))
 
     def emit(sample: bytes, x: int, y: int):
         base = (y * w + x) * 4
@@ -384,10 +385,11 @@ def verify(path: str, verdict: Verdict, mine: bytes) -> None:
     trns_key = None
     if verdict.trns is not None:
         hdr = verdict.hdr
+        mask = (1 << hdr["depth"]) - 1
         if hdr["color_type"] == 0:
-            trns_key = struct.unpack(">H", verdict.trns[0:2])[0]
+            trns_key = struct.unpack(">H", verdict.trns[0:2])[0] & mask
         elif hdr["color_type"] == 2:
-            trns_key = struct.unpack(">HHH", verdict.trns[0:6])
+            trns_key = tuple(v & mask for v in struct.unpack(">HHH", verdict.trns[0:6]))
     ref = pil_rgba8(path, verdict.hdr, trns_key)
     if ref != mine:
         for i in range(0, len(ref), 4):

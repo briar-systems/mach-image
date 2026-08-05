@@ -486,6 +486,16 @@ fun sample_8(src: *u8, i: usize, depth: u8) u8 {
     ret src[i];
 }
 
+# a tRNS sample reduced to the image depth
+#
+# the chunk always stores two bytes for grayscale and RGB, but at depth 8 its
+# high byte is unused and must not affect the transparency comparison.
+fun trns_sample(ctx: *PngCtx, off: usize) u16 {
+    val sample: u16 = read_be16(ctx.trns, off);
+    if (ctx.depth == 8) { ret sample & 0x00FF; }
+    ret sample;
+}
+
 # expand one source pixel to RGBA8
 #
 # tRNS is matched against the sample at its stored precision, not the reduced
@@ -500,7 +510,7 @@ fun emit_pixel(ctx: *PngCtx, src: *u8, dst: *u8) DecodeStatus {
         dst[1] = g;
         dst[2] = g;
         dst[3] = 255;
-        if (ctx.has_trns != 0 && sample_full(src, 0, depth) == read_be16(ctx.trns, 0)) {
+        if (ctx.has_trns != 0 && sample_full(src, 0, depth) == trns_sample(ctx, 0)) {
             dst[3] = 0;
         }
         ret DECODE_OK;
@@ -512,9 +522,9 @@ fun emit_pixel(ctx: *PngCtx, src: *u8, dst: *u8) DecodeStatus {
         dst[2] = sample_8(src, 2, depth);
         dst[3] = 255;
         if (ctx.has_trns != 0) {
-            if (sample_full(src, 0, depth) == read_be16(ctx.trns, 0)
-                && sample_full(src, 1, depth) == read_be16(ctx.trns, 2)
-                && sample_full(src, 2, depth) == read_be16(ctx.trns, 4)) {
+            if (sample_full(src, 0, depth) == trns_sample(ctx, 0)
+                && sample_full(src, 1, depth) == trns_sample(ctx, 2)
+                && sample_full(src, 2, depth) == trns_sample(ctx, 4)) {
                 dst[3] = 0;
             }
         }
@@ -940,6 +950,13 @@ var file_trns_before_plte: [102]u8 = [102]u8{
     65, 84, 120, 156, 99, 96, 100, 98, 6, 0, 0, 14, 0, 7, 215, 111, 228, 120, 0, 0, 0, 0, 73, 69,
     78, 68, 174, 66, 96, 130
 };
+# grayscale 42 with tRNS 0xFF2A: the unused high byte must be masked.
+var file_trns_mask: [81]u8 = [81]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+    8, 0, 0, 0, 0, 58, 126, 155, 85, 0, 0, 0, 2, 116, 82, 78, 83, 255, 42, 62, 12, 249, 156, 0,
+    0, 0, 10, 73, 68, 65, 84, 120, 156, 99, 208, 2, 0, 0, 44, 0, 43, 204, 122, 232, 230, 0, 0, 0,
+    0, 73, 69, 78, 68, 174, 66, 96, 130
+};
 var file_gray1: [69]u8 = [69]u8{
     137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 4, 0, 0, 0, 2, 1, 0,
     0, 0, 0, 87, 211, 64, 206, 0, 0, 0, 12, 73, 68, 65, 84, 120, 218, 99, 216, 192, 224, 1, 0,
@@ -1178,6 +1195,15 @@ test "png: info enforces PLTE placement and color types" {
     var img: Image;
     if (png_info(?file_gray_plte[0], 82, ?img) != DECODE_BAD_HEADER)       { ret 1; }
     if (png_info(?file_trns_before_plte[0], 102, ?img) != DECODE_BAD_HEADER) { ret 2; }
+    ret 0;
+}
+
+test "png: tRNS masks bits above the image depth" {
+    var img: Image;
+    if (png_decode(?file_trns_mask[0], 81, ?png_pix[0], 256,
+                   ?png_work[0], 33280, ?img) != DECODE_OK) { ret 1; }
+    if (img.channels != 4)                                  { ret 2; }
+    if (png_pix[0] != 42 || png_pix[1] != 42 || png_pix[2] != 42 || png_pix[3] != 0) { ret 3; }
     ret 0;
 }
 
