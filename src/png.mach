@@ -101,6 +101,13 @@ fun chunk_is(p: *u8, off: usize, a: u8, b: u8, c: u8, d: u8) u8 {
     ret 1;
 }
 
+# whether a byte is allowed in a PNG chunk type
+fun chunk_type_byte(b: u8) u8 {
+    if (b >= 'A' && b <= 'Z') { ret 1; }
+    if (b >= 'a' && b <= 'z') { ret 1; }
+    ret 0;
+}
+
 # the IHDR fields the decoder needs, plus the derived sample count
 # ---
 # width, height: image dimensions in pixels
@@ -243,18 +250,26 @@ fun scan_chunks(src: *u8, src_len: usize, hdr: *PngHeader, out: *PngScan) Decode
     var seen_iend: u8 = 0;
 
     for (seen_iend == 0) {
-        if (off + PNG_CHUNK_OVER > src_len) { ret DECODE_TRUNCATED; }
+        if (off > src_len)                         { ret DECODE_TRUNCATED; }
+        if (src_len - off < PNG_CHUNK_OVER)        { ret DECODE_TRUNCATED; }
         val raw_len: u32 = read_be32(src, off);
         if (raw_len > 0x7FFFFFFF) { ret DECODE_BAD_HEADER; }
 
         val dlen: usize = raw_len::usize;
-        if (off + PNG_CHUNK_OVER + dlen > src_len) { ret DECODE_TRUNCATED; }
+        if (dlen > src_len - off - PNG_CHUNK_OVER) { ret DECODE_TRUNCATED; }
 
         # the CRC covers the type field and the payload, not the length.
         val want: u32 = read_be32(src, off + 8 + dlen);
         if (crc.hash(?src[off + 4], 4 + dlen) != want) { ret DECODE_CORRUPT; }
 
         val type_off: usize = off + 4;
+        if (chunk_type_byte(src[type_off]) == 0
+            || chunk_type_byte(src[type_off + 1]) == 0
+            || chunk_type_byte(src[type_off + 2]) == 0
+            || chunk_type_byte(src[type_off + 3]) == 0) {
+            ret DECODE_BAD_HEADER;
+        }
+
         val data:     usize = off + 8;
 
         if (chunk_is(src, type_off, 'I', 'H', 'D', 'R') != 0) {
@@ -600,7 +615,7 @@ fun decode_raster(hdr: *PngHeader, ctx: *PngCtx, raw: *u8, raw_len: usize, dst: 
             var prev: *u8 = nil;
             var row:  usize = 0;
             for (row < ph) {
-                if (off + 1 + row_bytes > raw_len) { ret DECODE_TRUNCATED; }
+                if (off >= raw_len || row_bytes > raw_len - off - 1) { ret DECODE_TRUNCATED; }
                 val filter: u8  = raw[off];
                 val cur:    *u8 = ?raw[off + 1];
 
@@ -697,9 +712,12 @@ fun inflate_idat(src: *u8, src_len: usize, z: *ZL.Decompressor, dst: *u8, dst_le
     for (seen_iend == 0) {
         # scan_chunks already walked this framing, but the bounds are rechecked
         # rather than assumed: nothing here should trust the source buffer.
-        if (off + PNG_CHUNK_OVER > src_len) { ret DECODE_TRUNCATED; }
-        val dlen: usize = read_be32(src, off)::usize;
-        if (off + PNG_CHUNK_OVER + dlen > src_len) { ret DECODE_TRUNCATED; }
+        if (off > src_len)                         { ret DECODE_TRUNCATED; }
+        if (src_len - off < PNG_CHUNK_OVER)        { ret DECODE_TRUNCATED; }
+        val raw_len: u32 = read_be32(src, off);
+        if (raw_len > 0x7FFFFFFF)                  { ret DECODE_BAD_HEADER; }
+        val dlen: usize = raw_len::usize;
+        if (dlen > src_len - off - PNG_CHUNK_OVER) { ret DECODE_TRUNCATED; }
 
         val type_off: usize = off + 4;
         val data:     usize = off + 8;
@@ -933,6 +951,12 @@ var file_unknown_critical: [79]u8 = [79]u8{
 var file_unknown_ancillary: [79]u8 = [79]u8{
     137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
     8, 0, 0, 0, 0, 58, 126, 155, 85, 0, 0, 0, 0, 97, 66, 67, 68, 123, 37, 143, 155, 0, 0, 0,
+    10, 73, 68, 65, 84, 120, 156, 99, 208, 2, 0, 0, 44, 0, 43, 204, 122, 232, 230, 0, 0, 0, 0, 73,
+    69, 78, 68, 174, 66, 96, 130
+};
+var file_invalid_chunk_type: [79]u8 = [79]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+    8, 0, 0, 0, 0, 58, 126, 155, 85, 0, 0, 0, 0, 97, 66, 49, 68, 102, 44, 148, 239, 0, 0, 0,
     10, 73, 68, 65, 84, 120, 156, 99, 208, 2, 0, 0, 44, 0, 43, 204, 122, 232, 230, 0, 0, 0, 0, 73,
     69, 78, 68, 174, 66, 96, 130
 };
@@ -1202,6 +1226,7 @@ test "png: unknown chunks honor the critical bit" {
     if (png_decode(?file_unknown_ancillary[0], 79, ?png_pix[0], 256,
                    ?png_work[0], 33280, ?img) != DECODE_OK)                 { ret 4; }
     if (png_pix[0] != 42 || png_pix[1] != 42 || png_pix[2] != 42 || png_pix[3] != 255) { ret 5; }
+    if (png_info(?file_invalid_chunk_type[0], 79, ?img) != DECODE_BAD_HEADER) { ret 6; }
     ret 0;
 }
 

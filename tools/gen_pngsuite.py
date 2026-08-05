@@ -77,6 +77,12 @@ def depth_allowed(color_type: int, depth: int) -> bool:
     return depth in (8, 16)
 
 
+def chunk_type_valid(ctype: bytes) -> bool:
+    return len(ctype) == 4 and all(
+        ord("A") <= b <= ord("Z") or ord("a") <= b <= ord("z") for b in ctype
+    )
+
+
 class Verdict:
     """the expected png_info outcome for one file."""
 
@@ -133,6 +139,8 @@ def classify(data: bytes) -> Verdict:
         calc = zlib.crc32(data[off + 4:off + 8 + dlen]) & 0xFFFFFFFF
         if calc != want:
             return Verdict("DECODE_CORRUPT")
+        if not chunk_type_valid(ctype):
+            return Verdict("DECODE_BAD_HEADER")
 
         if ctype == b"IHDR":
             if seen_ihdr or off != 8 or dlen != 13:
