@@ -264,11 +264,9 @@ fun scan_chunks(src: *u8, src_len: usize, hdr: *PngHeader, out: *PngScan) Decode
         or (chunk_is(src, type_off, 'P', 'L', 'T', 'E') != 0) {
             if (out.has_plte != 0 || seen_idat != 0) { ret DECODE_BAD_HEADER; }
             if (dlen == 0 || dlen % 3 != 0)          { ret DECODE_BAD_HEADER; }
+            # 256 is also the depth-8 index ceiling, the only depth a palette
+            # reaches here: parse_ihdr has already turned 1/2/4 away.
             if (dlen / 3 > 256)                      { ret DECODE_BAD_HEADER; }
-            # a palette may not index deeper than the bit depth allows.
-            if (dlen / 3 > 1::usize << hdr.depth::usize && hdr.color_type == PNG_COLOR_PALETTE) {
-                ret DECODE_BAD_HEADER;
-            }
             out.plte_off     = data;
             out.plte_entries = dlen / 3;
             out.has_plte     = 1;
