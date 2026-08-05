@@ -1,4 +1,4 @@
-# the PNG codec: decoder
+# the PNG codec: decoder and minimal RGBA8 encoder
 #
 # a PNG is an 8-byte signature followed by a chain of length-prefixed,
 # CRC-protected chunks. IHDR carries the dimensions and pixel format, PLTE the
@@ -10,7 +10,9 @@
 # this module decodes every spec-defined bit depth across all five color types,
 # the five scanline filters, and both interlace methods, normalizing everything
 # to RGBA8. 16-bit samples keep their high byte; 1/2/4-bit grayscale samples are
-# replicated to 8 bits. every chunk's CRC is verified.
+# replicated to 8 bits. every chunk's CRC is verified. the encoder deliberately
+# emits one deterministic subset: noninterlaced RGBA8 scanlines with filter 0 in
+# a zlib stream made of stored DEFLATE blocks, without allocating.
 
 use std.types.size.usize;
 use std.types.string.str;
@@ -24,9 +26,11 @@ use R:   std.types.result;
 use Z:   std.compress.inflate;
 use ZL:  std.compress.zlib;
 use crc: std.crypto.hash.crc32;
+use adler: std.crypto.hash.adler32;
 use image.codec.Image;
 use image.codec.image_byte_len;
 use image.codec.COLORSPACE_SRGB;
+use image.codec.COLORSPACE_LINEAR;
 use image.codec.DecodeStatus;
 use image.codec.DECODE_OK;
 use image.codec.DECODE_TRUNCATED;
@@ -39,6 +43,10 @@ use image.codec.DECODE_CORRUPT;
 val PNG_SIG_LEN:    usize = 8;
 val PNG_IHDR_LEN:   usize = 13;
 val PNG_CHUNK_OVER: usize = 12;   # length + type + crc around every payload
+val PNG_STORED_MAX: usize = 65535;
+val PNG_ZLIB_OVER:  usize = 6;    # two-byte header plus four-byte Adler-32
+val PNG_FILE_FIXED: usize = 57;   # signature, chunk framing, IHDR, and IEND
+val PNG_CHUNK_MAX:  usize = 0x7FFFFFFF;
 
 # the fixed 8-byte PNG signature
 #
@@ -72,6 +80,18 @@ fun read_be32(p: *u8, off: usize) u32 {
 
 fun read_be16(p: *u8, off: usize) u16 {
     ret (p[off]::u16 << 8) | p[off + 1]::u16;
+}
+
+fun write_be32(p: *u8, off: usize, v: u32) {
+    p[off]     = (v >> 24)::u8;
+    p[off + 1] = (v >> 16)::u8;
+    p[off + 2] = (v >> 8)::u8;
+    p[off + 3] = v::u8;
+}
+
+fun write_le16(p: *u8, off: usize, v: u16) {
+    p[off]     = v::u8;
+    p[off + 1] = (v >> 8)::u8;
 }
 
 # a*b, or 0 when the product overflows usize
@@ -868,9 +888,188 @@ pub fun png_decode(src: *u8, src_len: usize, dst: *u8, dst_len: usize,
     ret DECODE_OK;
 }
 
+# number of stored DEFLATE blocks needed for a byte stream
+#
+# an empty stream still needs one final block even though the PNG encoder never
+# supplies one: valid images always have at least one filter byte and one pixel.
+fun stored_block_count(raw_len: usize) usize {
+    if (raw_len == 0) { ret 1; }
+    var count: usize = raw_len / PNG_STORED_MAX;
+    if (raw_len % PNG_STORED_MAX != 0) { count = count + 1; }
+    ret count;
+}
+
+# encoded size of raw_len bytes as stored DEFLATE blocks, excluding zlib framing
+fun stored_deflate_len(raw_len: usize) usize {
+    val blocks: usize = stored_block_count(raw_len);
+    val overhead: usize = mul_checked(blocks, 5);
+    if (overhead == 0) { ret 0; }
+    ret add_checked(raw_len, overhead);
+}
+
+# begin a PNG chunk and return its payload offset
+fun write_chunk_header(dst: *u8, off: usize, payload_len: usize,
+                       a: u8, b: u8, c: u8, d: u8) usize {
+    write_be32(dst, off, payload_len::u32);
+    dst[off + 4] = a;
+    dst[off + 5] = b;
+    dst[off + 6] = c;
+    dst[off + 7] = d;
+    ret off + 8;
+}
+
+# append a chunk's CRC and return the offset following it
+fun finish_chunk(dst: *u8, off: usize, payload_len: usize) usize {
+    val crc_off: usize = off + 8 + payload_len;
+    val sum: u32 = crc.hash(?dst[off + 4], payload_len + 4);
+    write_be32(dst, crc_off, sum);
+    ret crc_off + 4;
+}
+
+# write one stored-block header for remaining bytes and return its payload size
+#
+# the low header bit is BFINAL and BTYPE is zero. because every stored block
+# starts on a byte boundary, the other five padding bits are written as zero.
+fun write_stored_header(dst: *u8, off: usize, remaining: usize) usize {
+    var block_len: usize = remaining;
+    if (block_len > PNG_STORED_MAX) { block_len = PNG_STORED_MAX; }
+
+    dst[off] = 0;
+    if (remaining <= PNG_STORED_MAX) { dst[off] = 1; }
+
+    val len: u16 = block_len::u16;
+    write_le16(dst, off + 1, len);
+    write_le16(dst, off + 3, len ^ 0xFFFF);
+    ret block_len;
+}
+
+# exact encoded size for a deterministic RGBA8 PNG
+#
+# the output has one filter-0 byte per row and a zlib stream of stored DEFLATE
+# blocks. returns 0 for zero dimensions, arithmetic overflow, or an IDAT payload
+# too large for PNG's 31-bit chunk-length limit.
+# ---
+# width:  image width in pixels
+# height: image height in pixels
+# ret:    exact encoded size in bytes, or 0 if unrepresentable
+pub fun png_encode_bound(width: u32, height: u32) usize {
+    val pixels: usize = image_byte_len(width, height);
+    if (pixels == 0) { ret 0; }
+
+    val raw_len: usize = add_checked(pixels, height::usize);
+    if (raw_len == 0) { ret 0; }
+
+    val deflate_len: usize = stored_deflate_len(raw_len);
+    if (deflate_len == 0) { ret 0; }
+
+    val idat_len: usize = add_checked(deflate_len, PNG_ZLIB_OVER);
+    if (idat_len == 0 || idat_len > PNG_CHUNK_MAX) { ret 0; }
+    ret add_checked(PNG_FILE_FIXED, idat_len);
+}
+
+# encode an RGBA8 Image as a deterministic, allocation-free PNG
+#
+# emits color type 6 at 8 bits per sample, one noninterlaced filter-0 scanline
+# per row, and one IDAT containing a zlib stream of stored DEFLATE blocks. the
+# caller owns both the source pixels and destination. dst must be at least
+# png_encode_bound(width, height) bytes; a shorter buffer is left untouched.
+# ---
+# img:     image whose pixels hold width*height*4 RGBA8 bytes
+# dst:     destination buffer for the PNG file
+# dst_len: size of dst in bytes
+# ret:     bytes written, or 0 on invalid input or a short buffer
+pub fun png_encode(img: *Image, dst: *u8, dst_len: usize) usize {
+    if (img == nil || dst == nil || img.pixels == nil) { ret 0; }
+    if (img.channels != 3 && img.channels != 4) { ret 0; }
+
+    val bound: usize = png_encode_bound(img.width, img.height);
+    if (bound == 0 || dst_len < bound) { ret 0; }
+
+    var i: usize = 0;
+    for (i < PNG_SIG_LEN) {
+        dst[i] = PNG_SIGNATURE[i];
+        i = i + 1;
+    }
+
+    val ihdr_off: usize = PNG_SIG_LEN;
+    val ihdr: usize = write_chunk_header(dst, ihdr_off, PNG_IHDR_LEN, 'I', 'H', 'D', 'R');
+    write_be32(dst, ihdr, img.width);
+    write_be32(dst, ihdr + 4, img.height);
+    dst[ihdr + 8]  = 8;
+    dst[ihdr + 9]  = PNG_COLOR_RGBA;
+    dst[ihdr + 10] = 0;
+    dst[ihdr + 11] = 0;
+    dst[ihdr + 12] = 0;
+
+    val idat_off: usize = finish_chunk(dst, ihdr_off, PNG_IHDR_LEN);
+    val raw_len: usize = image_byte_len(img.width, img.height) + img.height::usize;
+    val idat_len: usize = stored_deflate_len(raw_len) + PNG_ZLIB_OVER;
+    var p: usize = write_chunk_header(dst, idat_off, idat_len, 'I', 'D', 'A', 'T');
+
+    # 0x78 0x01 selects DEFLATE with a 32 KiB window, no preset dictionary,
+    # fastest/no compression, and a valid RFC 1950 FCHECK.
+    dst[p]     = 0x78;
+    dst[p + 1] = 0x01;
+    p = p + 2;
+
+    val row_len: usize = img.width::usize * 4 + 1;
+    var row_pos: usize = 0;
+    var pixel_pos: usize = 0;
+    var remaining: usize = raw_len;
+    var checksum: u32 = adler.init();
+
+    for (remaining > 0) {
+        val block_len: usize = write_stored_header(dst, p, remaining);
+        p = p + 5;
+        val block_off: usize = p;
+
+        var n: usize = 0;
+        for (n < block_len) {
+            if (row_pos == 0) {
+                dst[p] = 0;
+            }
+            or {
+                dst[p] = img.pixels[pixel_pos];
+                pixel_pos = pixel_pos + 1;
+            }
+
+            p = p + 1;
+            row_pos = row_pos + 1;
+            if (row_pos == row_len) { row_pos = 0; }
+            n = n + 1;
+        }
+
+        checksum = adler.update(checksum, ?dst[block_off], block_len);
+        remaining = remaining - block_len;
+    }
+
+    write_be32(dst, p, checksum);
+    p = p + 4;
+
+    p = finish_chunk(dst, idat_off, idat_len);
+    val iend_off: usize = p;
+    p = write_chunk_header(dst, iend_off, 0, 'I', 'E', 'N', 'D');
+    p = finish_chunk(dst, iend_off, 0);
+
+    if (p != bound) { ret 0; }
+    ret p;
+}
+
 var png_raw: [256]u8;
 var png_pix: [256]u8;
 var png_work: [33280]u8;   # inflate window plus a small raster
+var png_enc: [4096]u8;
+var png_enc_src: [256]u8;
+var png_enc_rt: [256]u8;
+
+# 1x1 RGBA8 file independently constructed and decoded with Python's zlib
+var png_enc_golden: [73]u8 = [73]u8{
+    137, 80, 78, 71, 13, 10, 26, 10,
+    0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 31, 21, 196, 137,
+    0, 0, 0, 16, 73, 68, 65, 84, 120, 1, 1, 5, 0, 250, 255, 0, 18, 52, 86, 120,
+    2, 13, 1, 21, 178, 100, 30, 196,
+    0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130
+};
 
 # fixture rasters below are the filtered scanline bytes a real encoder emits;
 # the expected pixels were produced by an independent PNG decoder.
@@ -1500,5 +1699,108 @@ test "png: adam7 pass extents cover every pixel" {
         }
         w = w + 1;
     }
+    ret 0;
+}
+
+test "png: encode matches an independently decoded golden" {
+    png_enc_src[0] = 0x12;
+    png_enc_src[1] = 0x34;
+    png_enc_src[2] = 0x56;
+    png_enc_src[3] = 0x78;
+
+    var src: Image;
+    src.pixels     = ?png_enc_src[0];
+    src.width      = 1;
+    src.height     = 1;
+    src.channels   = 4;
+    src.colorspace = COLORSPACE_SRGB;
+
+    if (png_encode_bound(1, 1) != 73) { ret 1; }
+    val n: usize = png_encode(?src, ?png_enc[0], 4096);
+    if (n != 73) { ret 2; }
+    if (!raw_equal(?png_enc[0], ?png_enc_golden[0], 73)) { ret 3; }
+
+    # the exact file also pins chunk layout, CRCs, zlib framing, and Adler-32.
+    if (read_be32(?png_enc[0], 8) != 13 || read_be32(?png_enc[0], 33) != 16) { ret 4; }
+    if (crc.hash(?png_enc[12], 17) != read_be32(?png_enc[0], 29)) { ret 5; }
+    if (crc.hash(?png_enc[37], 20) != read_be32(?png_enc[0], 57)) { ret 6; }
+    if (png_enc[41] != 0x78 || png_enc[42] != 0x01) { ret 7; }
+    if (read_be32(?png_enc[0], 53) != 0x020D0115) { ret 8; }
+    if (crc.hash(?png_enc[65], 4) != read_be32(?png_enc[0], 69)) { ret 9; }
+    ret 0;
+}
+
+test "png: encode then decode round-trips RGBA8" {
+    val w: u32 = 8;
+    val h: u32 = 8;
+    val bytes: usize = image_byte_len(w, h);
+    var i: usize = 0;
+    for (i < bytes) {
+        png_enc_src[i] = (i * 37 + i / 4 * 11)::u8;
+        i = i + 1;
+    }
+
+    var src: Image;
+    src.pixels     = ?png_enc_src[0];
+    src.width      = w;
+    src.height     = h;
+    src.channels   = 4;
+    src.colorspace = COLORSPACE_LINEAR;
+
+    val bound: usize = png_encode_bound(w, h);
+    if (bound == 0 || bound > 4096) { ret 1; }
+    val n: usize = png_encode(?src, ?png_enc[0], 4096);
+    if (n != bound) { ret 2; }
+
+    var info: Image;
+    if (png_info(?png_enc[0], n, ?info) != DECODE_OK) { ret 3; }
+    if (info.width != w || info.height != h || info.channels != 4) { ret 4; }
+
+    val scratch: usize = png_scratch_len(?png_enc[0], n);
+    if (scratch == 0 || scratch > 33280) { ret 5; }
+    if (png_decode(?png_enc[0], n, ?png_enc_rt[0], 256,
+                   ?png_work[0], scratch, ?info) != DECODE_OK) { ret 6; }
+    if (!raw_equal(?png_enc_src[0], ?png_enc_rt[0], bytes)) { ret 7; }
+    ret 0;
+}
+
+test "png: encode rejects invalid input and short buffers without writing" {
+    png_enc_src[0] = 1;
+    png_enc_src[1] = 2;
+    png_enc_src[2] = 3;
+    png_enc_src[3] = 4;
+
+    var src: Image;
+    src.pixels     = ?png_enc_src[0];
+    src.width      = 1;
+    src.height     = 1;
+    src.channels   = 4;
+    src.colorspace = COLORSPACE_SRGB;
+
+    var i: usize = 0;
+    for (i < 73) { png_enc[i] = 0xA5; i = i + 1; }
+    if (png_encode(?src, ?png_enc[0], 72) != 0) { ret 1; }
+    i = 0;
+    for (i < 73) {
+        if (png_enc[i] != 0xA5) { ret 2; }
+        i = i + 1;
+    }
+
+    if (png_encode(nil, ?png_enc[0], 73) != 0) { ret 3; }
+    if (png_encode(?src, nil, 73) != 0) { ret 4; }
+    src.pixels = nil;
+    if (png_encode(?src, ?png_enc[0], 73) != 0) { ret 5; }
+    src.pixels = ?png_enc_src[0];
+    src.channels = 2;
+    if (png_encode(?src, ?png_enc[0], 73) != 0) { ret 6; }
+    ret 0;
+}
+
+test "png: encode bound rejects zero and unrepresentable dimensions" {
+    if (png_encode_bound(0, 1) != 0) { ret 1; }
+    if (png_encode_bound(1, 0) != 0) { ret 2; }
+    if (png_encode_bound(0xFFFFFFFF, 0xFFFFFFFF) != 0) { ret 3; }
+    # even where usize can represent the raster, one IDAT cannot exceed 2^31-1.
+    if (png_encode_bound(0xFFFFFFFF, 1) != 0) { ret 4; }
     ret 0;
 }
