@@ -1,0 +1,1900 @@
+# the PNG codec: decoder and minimal RGBA8 encoder
+#
+# a PNG is an 8-byte signature followed by a chain of length-prefixed,
+# CRC-protected chunks. IHDR carries the dimensions and pixel format, PLTE the
+# palette, tRNS the transparency, and one or more IDAT chunks carry a single
+# zlib stream split at arbitrary points. inflating that stream yields the raw
+# raster: one filter byte per scanline followed by the scanline's bytes, with
+# an interlaced image splitting the raster into seven Adam7 passes.
+#
+# this module decodes every spec-defined bit depth across all five color types,
+# the five scanline filters, and both interlace methods, normalizing everything
+# to RGBA8. 16-bit samples keep their high byte; 1/2/4-bit grayscale samples are
+# replicated to 8 bits. every chunk's CRC is verified. the encoder deliberately
+# emits one deterministic subset: noninterlaced RGBA8 scanlines with filter 0 in
+# a zlib stream made of stored DEFLATE blocks, without allocating.
+
+use std.types.size.usize;
+use std.types.string.str;
+use std.types.bool.bool;
+use O:   std.types.option;
+use std.memory.raw_copy;
+use std.memory.raw_equal;
+use A:   std.allocator;
+use FIX: std.allocator.fixed;
+use R:   std.types.result;
+use Z:   std.compress.inflate;
+use ZL:  std.compress.zlib;
+use crc: std.crypto.hash.crc32;
+use adler: std.crypto.hash.adler32;
+use image.codec.Image;
+use image.codec.image_byte_len;
+use image.codec.COLORSPACE_SRGB;
+use image.codec.COLORSPACE_LINEAR;
+use image.codec.DecodeStatus;
+use image.codec.DECODE_OK;
+use image.codec.DECODE_TRUNCATED;
+use image.codec.DECODE_BAD_MAGIC;
+use image.codec.DECODE_BAD_HEADER;
+use image.codec.DECODE_SHORT_BUFFER;
+use image.codec.DECODE_UNSUPPORTED;
+use image.codec.DECODE_CORRUPT;
+
+val PNG_SIG_LEN:    usize = 8;
+val PNG_IHDR_LEN:   usize = 13;
+val PNG_CHUNK_OVER: usize = 12;   # length + type + crc around every payload
+val PNG_STORED_MAX: usize = 65535;
+val PNG_ZLIB_OVER:  usize = 6;    # two-byte header plus four-byte Adler-32
+val PNG_FILE_FIXED: usize = 57;   # signature, chunk framing, IHDR, and IEND
+val PNG_CHUNK_MAX:  usize = 0x7FFFFFFF;
+
+# the fixed 8-byte PNG signature
+#
+# the trailing CR/LF/EOF bytes are deliberate: they make a file mangled by a
+# text-mode transfer fail the check instead of decoding to garbage.
+pub val PNG_SIGNATURE: [8]u8 = [8]u8{137, 80, 78, 71, 13, 10, 26, 10};
+
+pub val PNG_COLOR_GRAY:       u8 = 0;
+pub val PNG_COLOR_RGB:        u8 = 2;
+pub val PNG_COLOR_PALETTE:    u8 = 3;
+pub val PNG_COLOR_GRAY_ALPHA: u8 = 4;
+pub val PNG_COLOR_RGBA:       u8 = 6;
+
+# Adam7 pass geometry: the first pixel each pass covers and its stride
+val adam7_x_start: [7]u8 = [7]u8{0, 4, 0, 2, 0, 1, 0};
+val adam7_y_start: [7]u8 = [7]u8{0, 0, 4, 0, 2, 0, 1};
+val adam7_x_step:  [7]u8 = [7]u8{8, 8, 4, 4, 2, 2, 1};
+val adam7_y_step:  [7]u8 = [7]u8{8, 8, 8, 4, 4, 2, 2};
+
+# scratch the sliding window needs, which heads the caller's buffer
+#
+# a zlib Decompressor wraps an Inflater and makes that one allocation and
+# nothing else, and the window allocates as u8, so alignment costs nothing and
+# the figure is exact rather than a lower bound. mach-std pins that with a test
+# asserting one byte less is refused.
+val PNG_WINDOW_SCRATCH: usize = Z.WINDOW;
+
+fun read_be32(p: *u8, off: usize) u32 {
+    ret (p[off]::u32 << 24) | (p[off + 1]::u32 << 16) | (p[off + 2]::u32 << 8) | p[off + 3]::u32;
+}
+
+fun read_be16(p: *u8, off: usize) u16 {
+    ret (p[off]::u16 << 8) | p[off + 1]::u16;
+}
+
+fun write_be32(p: *u8, off: usize, v: u32) {
+    p[off]     = (v >> 24)::u8;
+    p[off + 1] = (v >> 16)::u8;
+    p[off + 2] = (v >> 8)::u8;
+    p[off + 3] = v::u8;
+}
+
+fun write_le16(p: *u8, off: usize, v: u16) {
+    p[off]     = v::u8;
+    p[off + 1] = (v >> 8)::u8;
+}
+
+# a*b, or 0 when the product overflows usize
+#
+# mirrors image_byte_len's convention: a 0 result always means "cannot
+# represent" and is never a valid size.
+fun mul_checked(a: usize, b: usize) usize {
+    if (a == 0 || b == 0) { ret 0; }
+    val p: usize = a * b;
+    if (p / a != b) { ret 0; }
+    ret p;
+}
+
+# a+b, or 0 when the sum overflows usize
+fun add_checked(a: usize, b: usize) usize {
+    if (a > ~(0::usize) - b) { ret 0; }
+    ret a + b;
+}
+
+# the four bytes at off compared against a chunk type
+fun chunk_is(p: *u8, off: usize, a: u8, b: u8, c: u8, d: u8) u8 {
+    if (p[off] != a)     { ret 0; }
+    if (p[off + 1] != b) { ret 0; }
+    if (p[off + 2] != c) { ret 0; }
+    if (p[off + 3] != d) { ret 0; }
+    ret 1;
+}
+
+# whether a byte is allowed in a PNG chunk type
+fun chunk_type_byte(b: u8) u8 {
+    if (b >= 'A' && b <= 'Z') { ret 1; }
+    if (b >= 'a' && b <= 'z') { ret 1; }
+    ret 0;
+}
+
+# the IHDR fields the decoder needs, plus the derived sample count
+# ---
+# width, height: image dimensions in pixels
+# depth:         bits per sample (1, 2, 4, 8, or 16 as allowed by color type)
+# color_type:    PNG_COLOR_*
+# interlace:     0 none, 1 Adam7
+# channels:      samples per source pixel, derived from color_type
+rec PngHeader {
+    width:      u32;
+    height:     u32;
+    depth:      u8;
+    color_type: u8;
+    interlace:  u8;
+    channels:   u8;
+}
+
+# where the chunks the decoder consumes live in the source buffer
+# ---
+# plte_off/plte_entries: palette offset and entry count
+# trns_off/trns_len:     transparency offset and payload length in bytes
+# idat_total:            summed IDAT payload bytes, the zlib stream's length
+rec PngScan {
+    plte_off:     usize;
+    plte_entries: usize;
+    trns_off:     usize;
+    trns_len:     usize;
+    idat_total:   usize;
+    has_plte:     u8;
+    has_trns:     u8;
+}
+
+# everything a single source pixel needs to become RGBA8
+rec PngCtx {
+    color_type:   u8;
+    depth:        u8;
+    has_trns:     u8;
+    plte:         *u8;
+    plte_entries: usize;
+    trns:         *u8;
+    trns_len:     usize;
+}
+
+# samples per pixel for a color type, or 0 if the color type is not defined
+fun color_type_channels(color_type: u8) u8 {
+    if (color_type == PNG_COLOR_GRAY)       { ret 1; }
+    if (color_type == PNG_COLOR_RGB)        { ret 3; }
+    if (color_type == PNG_COLOR_PALETTE)    { ret 1; }
+    if (color_type == PNG_COLOR_GRAY_ALPHA) { ret 2; }
+    if (color_type == PNG_COLOR_RGBA)       { ret 4; }
+    ret 0;
+}
+
+# whether a bit depth is one the spec allows for a color type
+fun depth_allowed(color_type: u8, depth: u8) u8 {
+    if (color_type == PNG_COLOR_GRAY) {
+        if (depth == 1 || depth == 2 || depth == 4 || depth == 8 || depth == 16) { ret 1; }
+        ret 0;
+    }
+    if (color_type == PNG_COLOR_PALETTE) {
+        if (depth == 1 || depth == 2 || depth == 4 || depth == 8) { ret 1; }
+        ret 0;
+    }
+    if (depth == 8 || depth == 16) { ret 1; }
+    ret 0;
+}
+
+# parse the IHDR payload at data into out
+#
+# separates malformed from unsupported: a field the spec does not define is
+# DECODE_BAD_HEADER; all spec-defined depth/color combinations are accepted.
+fun parse_ihdr(src: *u8, data: usize, out: *PngHeader) DecodeStatus {
+    val width:       u32 = read_be32(src, data);
+    val height:      u32 = read_be32(src, data + 4);
+    val depth:       u8  = src[data + 8];
+    val color_type:  u8  = src[data + 9];
+    val compression: u8  = src[data + 10];
+    val filter:      u8  = src[data + 11];
+    val interlace:   u8  = src[data + 12];
+
+    if (width == 0 || height == 0 || width > 0x7FFFFFFF || height > 0x7FFFFFFF) {
+        ret DECODE_BAD_HEADER;
+    }
+
+    val channels: u8 = color_type_channels(color_type);
+    if (channels == 0)                         { ret DECODE_BAD_HEADER; }
+    if (depth_allowed(color_type, depth) == 0) { ret DECODE_BAD_HEADER; }
+    if (compression != 0)                      { ret DECODE_BAD_HEADER; }
+    if (filter != 0)                           { ret DECODE_BAD_HEADER; }
+    if (interlace != 0 && interlace != 1)      { ret DECODE_BAD_HEADER; }
+
+    # the output buffer has to be representable before any size arithmetic runs.
+    if (image_byte_len(width, height) == 0)    { ret DECODE_BAD_HEADER; }
+
+    out.width      = width;
+    out.height     = height;
+    out.depth      = depth;
+    out.color_type = color_type;
+    out.interlace  = interlace;
+    out.channels   = channels;
+
+    # the raster is larger than the output buffer and is the binding limit: a
+    # dimension pair can be spec-legal yet overflow the scanline arithmetic.
+    if (raw_byte_len(out) == 0) { ret DECODE_BAD_HEADER; }
+    ret DECODE_OK;
+}
+
+# walk the whole chunk stream, validating framing and CRC
+#
+# doubles as a whole-file integrity check: every chunk's CRC is verified, and
+# the ordering rules the decoder depends on (IHDR first, PLTE and tRNS before
+# the image data, IDAT consecutive, IEND last) are enforced. unknown ancillary
+# chunks are skipped; an unknown critical chunk is unsupported because its
+# effect on the decoded image cannot be known.
+fun scan_chunks(src: *u8, src_len: usize, hdr: *PngHeader, out: *PngScan) DecodeStatus {
+    if (src == nil)         { ret DECODE_BAD_HEADER; }
+    if (src_len < PNG_SIG_LEN) { ret DECODE_TRUNCATED; }
+
+    var i: usize = 0;
+    for (i < PNG_SIG_LEN) {
+        if (src[i] != PNG_SIGNATURE[i]) { ret DECODE_BAD_MAGIC; }
+        i = i + 1;
+    }
+
+    out.plte_off     = 0;
+    out.plte_entries = 0;
+    out.trns_off     = 0;
+    out.trns_len     = 0;
+    out.idat_total   = 0;
+    out.has_plte     = 0;
+    out.has_trns     = 0;
+
+    var off:       usize = PNG_SIG_LEN;
+    var seen_ihdr: u8 = 0;
+    var seen_idat: u8 = 0;
+    var idat_done: u8 = 0;
+    var seen_iend: u8 = 0;
+
+    for (seen_iend == 0) {
+        if (off > src_len)                         { ret DECODE_TRUNCATED; }
+        if (src_len - off < PNG_CHUNK_OVER)        { ret DECODE_TRUNCATED; }
+        val raw_len: u32 = read_be32(src, off);
+        if (raw_len > 0x7FFFFFFF) { ret DECODE_BAD_HEADER; }
+
+        val dlen: usize = raw_len::usize;
+        if (dlen > src_len - off - PNG_CHUNK_OVER) { ret DECODE_TRUNCATED; }
+
+        # the CRC covers the type field and the payload, not the length.
+        val want: u32 = read_be32(src, off + 8 + dlen);
+        if (crc.hash(?src[off + 4], 4 + dlen) != want) { ret DECODE_CORRUPT; }
+
+        val type_off: usize = off + 4;
+        if (chunk_type_byte(src[type_off]) == 0
+            || chunk_type_byte(src[type_off + 1]) == 0
+            || chunk_type_byte(src[type_off + 2]) == 0
+            || chunk_type_byte(src[type_off + 3]) == 0) {
+            ret DECODE_BAD_HEADER;
+        }
+
+        val data:     usize = off + 8;
+
+        if (chunk_is(src, type_off, 'I', 'H', 'D', 'R') != 0) {
+            if (seen_ihdr != 0)       { ret DECODE_BAD_HEADER; }
+            if (off != PNG_SIG_LEN)   { ret DECODE_BAD_HEADER; }
+            if (dlen != PNG_IHDR_LEN) { ret DECODE_BAD_HEADER; }
+            val hs: DecodeStatus = parse_ihdr(src, data, hdr);
+            if (hs != DECODE_OK) { ret hs; }
+            seen_ihdr = 1;
+        }
+        or (seen_ihdr == 0) {
+            ret DECODE_BAD_HEADER;
+        }
+        or (chunk_is(src, type_off, 'P', 'L', 'T', 'E') != 0) {
+            if (out.has_plte != 0 || out.has_trns != 0 || seen_idat != 0) {
+                ret DECODE_BAD_HEADER;
+            }
+            if (hdr.color_type == PNG_COLOR_GRAY || hdr.color_type == PNG_COLOR_GRAY_ALPHA) {
+                ret DECODE_BAD_HEADER;
+            }
+            if (dlen == 0 || dlen % 3 != 0)          { ret DECODE_BAD_HEADER; }
+            if (dlen / 3 > 256)                      { ret DECODE_BAD_HEADER; }
+            if (hdr.color_type == PNG_COLOR_PALETTE
+                && dlen / 3 > (1::usize << hdr.depth::usize)) {
+                ret DECODE_BAD_HEADER;
+            }
+            out.plte_off     = data;
+            out.plte_entries = dlen / 3;
+            out.has_plte     = 1;
+            idat_done        = seen_idat;
+        }
+        or (chunk_is(src, type_off, 't', 'R', 'N', 'S') != 0) {
+            if (out.has_trns != 0 || seen_idat != 0) { ret DECODE_BAD_HEADER; }
+            # tRNS carries a different payload per color type, and the spec
+            # forbids it entirely where alpha is already per-pixel.
+            if (hdr.color_type == PNG_COLOR_GRAY) {
+                if (dlen != 2) { ret DECODE_BAD_HEADER; }
+            }
+            or (hdr.color_type == PNG_COLOR_RGB) {
+                if (dlen != 6) { ret DECODE_BAD_HEADER; }
+            }
+            or (hdr.color_type == PNG_COLOR_PALETTE) {
+                if (out.has_plte == 0)         { ret DECODE_BAD_HEADER; }
+                if (dlen > out.plte_entries)   { ret DECODE_BAD_HEADER; }
+            }
+            or {
+                ret DECODE_BAD_HEADER;
+            }
+            out.trns_off = data;
+            out.trns_len = dlen;
+            out.has_trns = 1;
+            idat_done    = seen_idat;
+        }
+        or (chunk_is(src, type_off, 'I', 'D', 'A', 'T') != 0) {
+            # the spec requires the IDAT run to be unbroken; a gap would mean
+            # reassembling the zlib stream out of order.
+            if (idat_done != 0) { ret DECODE_BAD_HEADER; }
+            seen_idat      = 1;
+            out.idat_total = add_checked(out.idat_total, dlen);
+            if (out.idat_total == 0 && dlen != 0) { ret DECODE_BAD_HEADER; }
+        }
+        or (chunk_is(src, type_off, 'I', 'E', 'N', 'D') != 0) {
+            if (dlen != 0)     { ret DECODE_BAD_HEADER; }
+            if (seen_idat == 0) { ret DECODE_BAD_HEADER; }
+            seen_iend = 1;
+        }
+        or {
+            # bit 5 of the first type byte distinguishes ancillary chunks from
+            # critical ones. only the former are safe to ignore.
+            if ((src[type_off] & 0x20) == 0) { ret DECODE_UNSUPPORTED; }
+            idat_done = seen_idat;
+        }
+
+        off = off + PNG_CHUNK_OVER + dlen;
+    }
+
+    if (hdr.color_type == PNG_COLOR_PALETTE && out.has_plte == 0) { ret DECODE_BAD_HEADER; }
+    ret DECODE_OK;
+}
+
+# pixels a pass covers along one axis
+fun pass_extent(size: usize, start: usize, step: usize) usize {
+    if (size <= start) { ret 0; }
+    ret (size - start + step - 1) / step;
+}
+
+# bytes a filtered scanline of w pixels occupies, filter byte included
+#
+# returns 0 when w is 0 or the length would overflow usize.
+fun filtered_row_len(w: usize, channels: usize, depth: usize) usize {
+    if (w == 0) { ret 0; }
+    val samples: usize = mul_checked(w, channels);
+    if (samples == 0) { ret 0; }
+    val bits: usize = mul_checked(samples, depth);
+    if (bits == 0) { ret 0; }
+    val padded: usize = add_checked(bits, 7);
+    if (padded == 0) { ret 0; }
+    val bytes: usize = padded / 8;
+    ret add_checked(bytes, 1);
+}
+
+# the byte stride PNG's scanline filters use for one source pixel
+#
+# The spec rounds channels*depth up to a whole byte and requires at least one,
+# so every sub-byte grayscale/palette row filters with bpp=1.
+fun filter_bpp(channels: usize, depth: usize) usize {
+    ret (channels * depth + 7) / 8;
+}
+
+# bytes the fully decompressed raster occupies
+#
+# the sum of every pass's filtered scanlines, which for a non-interlaced image
+# is the single whole-image pass. returns 0 if the size is unrepresentable.
+fun raw_byte_len(hdr: *PngHeader) usize {
+    val channels: usize = hdr.channels::usize;
+    val depth:    usize = hdr.depth::usize;
+    val width:    usize = hdr.width::usize;
+    val height:   usize = hdr.height::usize;
+
+    if (hdr.interlace == 0) {
+        val row: usize = filtered_row_len(width, channels, depth);
+        if (row == 0) { ret 0; }
+        ret mul_checked(row, height);
+    }
+
+    var total: usize = 0;
+    var pass:  usize = 0;
+    for (pass < 7) {
+        val pw: usize = pass_extent(width, adam7_x_start[pass]::usize, adam7_x_step[pass]::usize);
+        val ph: usize = pass_extent(height, adam7_y_start[pass]::usize, adam7_y_step[pass]::usize);
+        if (pw != 0 && ph != 0) {
+            val row: usize = filtered_row_len(pw, channels, depth);
+            if (row == 0) { ret 0; }
+            val bytes: usize = mul_checked(row, ph);
+            if (bytes == 0) { ret 0; }
+            total = add_checked(total, bytes);
+            if (total == 0) { ret 0; }
+        }
+        pass = pass + 1;
+    }
+    ret total;
+}
+
+# total scratch for this image: the inflate window, the raster, and the spare
+# byte that catches an over-long stream
+#
+# returns 0 if any step is unrepresentable, matching raw_byte_len.
+fun scratch_byte_len(hdr: *PngHeader) usize {
+    val raw: usize = raw_byte_len(hdr);
+    if (raw == 0) { ret 0; }
+    val guarded: usize = add_checked(raw, 1);
+    if (guarded == 0) { ret 0; }
+    ret add_checked(PNG_WINDOW_SCRATCH, guarded);
+}
+
+fun abs_i32(v: i32) i32 {
+    if (v < 0) { ret -v; }
+    ret v;
+}
+
+# the PNG Paeth predictor over the left, above, and above-left bytes
+fun paeth(a: u8, b: u8, c: u8) u8 {
+    val p:  i32 = a::i32 + b::i32 - c::i32;
+    val pa: i32 = abs_i32(p - a::i32);
+    val pb: i32 = abs_i32(p - b::i32);
+    val pc: i32 = abs_i32(p - c::i32);
+    if (pa <= pb && pa <= pc) { ret a; }
+    if (pb <= pc)             { ret b; }
+    ret c;
+}
+
+# reverse one scanline's filter in place
+#
+# cur is the scanline's data bytes (the filter byte already stripped) and prev
+# the previous scanline's, or nil on the first row of a pass, where the spec
+# treats the row above as all zero. bpp is the filter's byte stride, rounded up
+# to one byte for sub-byte pixels. all arithmetic is mod 256.
+fun unfilter_row(filter: u8, cur: *u8, prev: *u8, len: usize, bpp: usize) DecodeStatus {
+    var i: usize = 0;
+
+    if (filter == 0) {
+        ret DECODE_OK;
+    }
+    if (filter == 1) {
+        i = bpp;
+        for (i < len) {
+            cur[i] = cur[i] + cur[i - bpp];
+            i = i + 1;
+        }
+        ret DECODE_OK;
+    }
+    if (filter == 2) {
+        if (prev == nil) { ret DECODE_OK; }
+        for (i < len) {
+            cur[i] = cur[i] + prev[i];
+            i = i + 1;
+        }
+        ret DECODE_OK;
+    }
+    if (filter == 3) {
+        for (i < len) {
+            var a: u16 = 0;
+            var b: u16 = 0;
+            if (i >= bpp)    { a = cur[i - bpp]::u16; }
+            if (prev != nil) { b = prev[i]::u16; }
+            cur[i] = cur[i] + ((a + b) / 2)::u8;
+            i = i + 1;
+        }
+        ret DECODE_OK;
+    }
+    if (filter == 4) {
+        for (i < len) {
+            var a: u8 = 0;
+            var b: u8 = 0;
+            var c: u8 = 0;
+            if (i >= bpp)    { a = cur[i - bpp]; }
+            if (prev != nil) {
+                b = prev[i];
+                if (i >= bpp) { c = prev[i - bpp]; }
+            }
+            cur[i] = cur[i] + paeth(a, b, c);
+            i = i + 1;
+        }
+        ret DECODE_OK;
+    }
+
+    ret DECODE_CORRUPT;
+}
+
+# the mask for one sample at depth
+fun sample_mask(depth: u8) u16 {
+    if (depth == 16) { ret 0xFFFF; }
+    ret ((1::usize << depth::usize) - 1)::u16;
+}
+
+# the i-th sample of a row pixel at its stored precision
+#
+# bit_off is the pixel's first bit within the row. sub-byte samples are packed
+# most-significant first and never cross a byte because every valid depth divides
+# eight; byte-aligned samples retain PNG's big-endian 16-bit representation.
+fun source_sample(src: *u8, bit_off: usize, i: usize, depth: u8) u16 {
+    val at: usize = bit_off + i * depth::usize;
+    if (depth < 8) {
+        val shift: usize = 8 - depth::usize - (at & 7);
+        ret ((src[at / 8]::usize >> shift) & sample_mask(depth)::usize)::u16;
+    }
+    if (depth == 16) { ret read_be16(src, at / 8); }
+    ret src[at / 8]::u16;
+}
+
+# reduce one stored sample to 8 bits
+#
+# 16-bit samples keep their high byte. sub-byte grayscale uses exact bit
+# replication: multiplying by 255/max produces 0/255, 0/85/170/255, or n*17.
+fun sample_8(sample: u16, depth: u8) u8 {
+    if (depth == 16) { ret (sample >> 8)::u8; }
+    if (depth == 8)  { ret sample::u8; }
+    ret ((sample * 255) / sample_mask(depth))::u8;
+}
+
+# a tRNS sample reduced to the image depth
+#
+# the chunk always stores two bytes for grayscale and RGB, but at depth 8 its
+# high byte is unused and must not affect the transparency comparison.
+fun trns_sample(ctx: *PngCtx, off: usize) u16 {
+    val sample: u16 = read_be16(ctx.trns, off);
+    ret sample & sample_mask(ctx.depth);
+}
+
+# expand one source pixel to RGBA8
+#
+# tRNS is matched against the sample at its stored precision, not the reduced
+# 8-bit value, so two 16-bit samples that collapse to the same byte stay
+# distinguishable.
+fun emit_pixel(ctx: *PngCtx, src: *u8, bit_off: usize, dst: *u8) DecodeStatus {
+    val depth: u8 = ctx.depth;
+
+    if (ctx.color_type == PNG_COLOR_GRAY) {
+        val full: u16 = source_sample(src, bit_off, 0, depth);
+        val g: u8 = sample_8(full, depth);
+        dst[0] = g;
+        dst[1] = g;
+        dst[2] = g;
+        dst[3] = 255;
+        if (ctx.has_trns != 0 && full == trns_sample(ctx, 0)) {
+            dst[3] = 0;
+        }
+        ret DECODE_OK;
+    }
+
+    if (ctx.color_type == PNG_COLOR_RGB) {
+        val r: u16 = source_sample(src, bit_off, 0, depth);
+        val g: u16 = source_sample(src, bit_off, 1, depth);
+        val b: u16 = source_sample(src, bit_off, 2, depth);
+        dst[0] = sample_8(r, depth);
+        dst[1] = sample_8(g, depth);
+        dst[2] = sample_8(b, depth);
+        dst[3] = 255;
+        if (ctx.has_trns != 0) {
+            if (r == trns_sample(ctx, 0)
+                && g == trns_sample(ctx, 2)
+                && b == trns_sample(ctx, 4)) {
+                dst[3] = 0;
+            }
+        }
+        ret DECODE_OK;
+    }
+
+    if (ctx.color_type == PNG_COLOR_PALETTE) {
+        val idx: usize = source_sample(src, bit_off, 0, depth)::usize;
+        if (idx >= ctx.plte_entries) { ret DECODE_CORRUPT; }
+        val base: usize = idx * 3;
+        dst[0] = ctx.plte[base];
+        dst[1] = ctx.plte[base + 1];
+        dst[2] = ctx.plte[base + 2];
+        dst[3] = 255;
+        # tRNS may cover only a prefix of the palette; the rest stays opaque.
+        if (ctx.has_trns != 0 && idx < ctx.trns_len) { dst[3] = ctx.trns[idx]; }
+        ret DECODE_OK;
+    }
+
+    if (ctx.color_type == PNG_COLOR_GRAY_ALPHA) {
+        val g: u8 = sample_8(source_sample(src, bit_off, 0, depth), depth);
+        dst[0] = g;
+        dst[1] = g;
+        dst[2] = g;
+        dst[3] = sample_8(source_sample(src, bit_off, 1, depth), depth);
+        ret DECODE_OK;
+    }
+
+    dst[0] = sample_8(source_sample(src, bit_off, 0, depth), depth);
+    dst[1] = sample_8(source_sample(src, bit_off, 1, depth), depth);
+    dst[2] = sample_8(source_sample(src, bit_off, 2, depth), depth);
+    dst[3] = sample_8(source_sample(src, bit_off, 3, depth), depth);
+    ret DECODE_OK;
+}
+
+# expand already-decompressed filtered scanlines into the RGBA8 destination
+#
+# raw holds the passes back to back, each pass a run of scanlines prefixed by a
+# filter byte; defiltering happens in place, so raw is modified. a
+# non-interlaced image is the single-pass case of the same walk, which is why
+# there is no separate path for it. dst must already be image_byte_len bytes.
+fun decode_raster(hdr: *PngHeader, ctx: *PngCtx, raw: *u8, raw_len: usize, dst: *u8) DecodeStatus {
+    val width:    usize = hdr.width::usize;
+    val height:   usize = hdr.height::usize;
+    val channels: usize = hdr.channels::usize;
+    val depth:    usize = hdr.depth::usize;
+    val bpp:      usize = filter_bpp(channels, depth);
+    val pixel_bits: usize = channels * depth;
+
+    var pass_count: usize = 1;
+    if (hdr.interlace != 0) { pass_count = 7; }
+
+    var off:  usize = 0;
+    var pass: usize = 0;
+    for (pass < pass_count) {
+        var x_start: usize = 0;
+        var y_start: usize = 0;
+        var x_step:  usize = 1;
+        var y_step:  usize = 1;
+        var pw:      usize = width;
+        var ph:      usize = height;
+
+        if (hdr.interlace != 0) {
+            x_start = adam7_x_start[pass]::usize;
+            y_start = adam7_y_start[pass]::usize;
+            x_step  = adam7_x_step[pass]::usize;
+            y_step  = adam7_y_step[pass]::usize;
+            pw      = pass_extent(width, x_start, x_step);
+            ph      = pass_extent(height, y_start, y_step);
+        }
+
+        if (pw != 0 && ph != 0) {
+            val filtered: usize = filtered_row_len(pw, channels, depth);
+            if (filtered == 0) { ret DECODE_CORRUPT; }
+            val row_bytes: usize = filtered - 1;
+            var prev: *u8 = nil;
+            var row:  usize = 0;
+            for (row < ph) {
+                if (off >= raw_len || row_bytes > raw_len - off - 1) { ret DECODE_TRUNCATED; }
+                val filter: u8  = raw[off];
+                val cur:    *u8 = ?raw[off + 1];
+
+                val fs: DecodeStatus = unfilter_row(filter, cur, prev, row_bytes, bpp);
+                if (fs != DECODE_OK) { ret fs; }
+
+                val y: usize = y_start + row * y_step;
+                var col: usize = 0;
+                for (col < pw) {
+                    val x: usize = x_start + col * x_step;
+                    val es: DecodeStatus = emit_pixel(
+                        ctx, cur, col * pixel_bits, ?dst[(y * width + x) * 4]);
+                    if (es != DECODE_OK) { ret es; }
+                    col = col + 1;
+                }
+
+                prev = cur;
+                off  = off + 1 + row_bytes;
+                row  = row + 1;
+            }
+        }
+        pass = pass + 1;
+    }
+
+    ret DECODE_OK;
+}
+
+# parse a PNG header into out (dimensions and metadata only)
+#
+# leaves out.pixels nil. unlike the single-header formats, this walks the whole
+# chunk stream: PNG reports transparency in a tRNS chunk that follows IHDR, so
+# the channel count is not knowable from the header alone. that makes an info
+# call a full framing and CRC check as well.
+# ---
+# src:     pointer to the encoded PNG bytes
+# src_len: number of bytes available at src
+# out:     Image to populate with width/height/channels/colorspace
+# ret:     DECODE_OK, or a DECODE_* error
+pub fun png_info(src: *u8, src_len: usize, out: *Image) DecodeStatus {
+    if (out == nil) { ret DECODE_BAD_HEADER; }
+
+    var hdr:  PngHeader;
+    var scan: PngScan;
+    val st: DecodeStatus = scan_chunks(src, src_len, ?hdr, ?scan);
+    if (st != DECODE_OK) { ret st; }
+
+    var channels: u8 = 3;
+    if (hdr.color_type == PNG_COLOR_GRAY_ALPHA
+        || hdr.color_type == PNG_COLOR_RGBA
+        || scan.has_trns != 0) {
+        channels = 4;
+    }
+
+    out.pixels     = nil;
+    out.width      = hdr.width;
+    out.height     = hdr.height;
+    out.channels   = channels;
+    out.colorspace = COLORSPACE_SRGB;
+    ret DECODE_OK;
+}
+
+# scratch bytes png_decode needs for this image
+#
+# the scratch holds the inflate window followed by the decompressed raster, so
+# the decoder allocates nothing of its own: the window is bump-allocated out of
+# this buffer. the raster gets one byte more than it needs, which is what lets
+# an over-long zlib stream be caught rather than silently truncated. returns 0
+# when the header is unreadable or the size is unrepresentable, so a 0 result is
+# never a valid scratch size.
+# ---
+# src:     pointer to the encoded PNG bytes
+# src_len: number of bytes available at src
+# ret:     required scratch size in bytes, or 0
+pub fun png_scratch_len(src: *u8, src_len: usize) usize {
+    var hdr:  PngHeader;
+    var scan: PngScan;
+    if (scan_chunks(src, src_len, ?hdr, ?scan) != DECODE_OK) { ret 0; }
+    ret scratch_byte_len(?hdr);
+}
+
+# decompress the zlib stream spread across the IDAT chunks into dst
+#
+# the stream is one zlib member split at arbitrary points, so the chunk
+# boundaries mean nothing to the decompressor and each payload is fed straight
+# from the source buffer with no staging copy. std.compress.zlib owns the
+# framing: it validates the two-byte header, tracks the Adler-32, and reports
+# DONE only once the trailer matches, all across chunk boundaries. dst is one
+# byte longer than the raster, so a stream that produces too much fills it and
+# is caught rather than silently truncated.
+fun inflate_idat(src: *u8, src_len: usize, z: *ZL.Decompressor, dst: *u8, dst_len: usize, raw_len: usize) DecodeStatus {
+    var produced:  usize = 0;
+    var off:       usize = PNG_SIG_LEN;
+    var seen_iend: u8 = 0;
+
+    for (seen_iend == 0) {
+        # scan_chunks already walked this framing, but the bounds are rechecked
+        # rather than assumed: nothing here should trust the source buffer.
+        if (off > src_len)                         { ret DECODE_TRUNCATED; }
+        if (src_len - off < PNG_CHUNK_OVER)        { ret DECODE_TRUNCATED; }
+        val raw_len: u32 = read_be32(src, off);
+        if (raw_len > 0x7FFFFFFF)                  { ret DECODE_BAD_HEADER; }
+        val dlen: usize = raw_len::usize;
+        if (dlen > src_len - off - PNG_CHUNK_OVER) { ret DECODE_TRUNCATED; }
+
+        val type_off: usize = off + 4;
+        val data:     usize = off + 8;
+
+        if (chunk_is(src, type_off, 'I', 'E', 'N', 'D') != 0) { seen_iend = 1; }
+        or (chunk_is(src, type_off, 'I', 'D', 'A', 'T') != 0) {
+            var pos: usize = 0;
+            for (pos < dlen) {
+                val res: R.Result[ZL.Progress, str] =
+                    ZL.decompress(z, ?src[data + pos], dlen - pos, ?dst[produced], dst_len - produced);
+                if (R.is_err[ZL.Progress, str](res)) { ret DECODE_CORRUPT; }
+
+                val p: ZL.Progress = R.unwrap_ok[ZL.Progress, str](res);
+                pos      = pos + p.consumed;
+                produced = produced + p.written;
+
+                # dst carries a spare byte, so filling it means the stream
+                # decompresses to more than the header's dimensions allow.
+                if (p.status == ZL.OUTPUT_FULL) { ret DECODE_CORRUPT; }
+                # bytes trailing a finished stream are not ours to interpret.
+                if (p.status == ZL.DONE)        { brk; }
+                # a call that neither consumed nor produced cannot be repeated
+                # to any effect; stop and let the checks below classify it.
+                if (p.consumed == 0 && p.written == 0) { brk; }
+            }
+        }
+
+        off = off + PNG_CHUNK_OVER + dlen;
+    }
+
+    # finish reports a stream that never reached its trailer, which is how a
+    # payload cut short mid-deflate surfaces.
+    if (R.is_err[bool, str](ZL.finish(z))) { ret DECODE_TRUNCATED; }
+    if (produced != raw_len) { ret DECODE_CORRUPT; }
+    ret DECODE_OK;
+}
+
+# decode a PNG into the caller-supplied RGBA8 buffer
+#
+# dst must be at least image_byte_len(width, height) bytes and scratch at least
+# png_scratch_len(src, src_len); both come from the caller, so the decode
+# allocates nothing and touches no OS interface. every chunk CRC and the zlib
+# stream's Adler-32 are verified, so a stream that decompresses to the wrong
+# length or fails its checksum is rejected rather than partially trusted.
+# ---
+# src:         pointer to the encoded PNG bytes
+# src_len:     number of bytes available at src
+# dst:         destination RGBA8 buffer
+# dst_len:     size of dst in bytes
+# scratch:     working buffer for the inflate window and the raster
+# scratch_len: size of scratch in bytes
+# out:         Image populated to describe the decoded pixels
+# ret:         DECODE_OK, or a DECODE_* error
+pub fun png_decode(src: *u8, src_len: usize, dst: *u8, dst_len: usize,
+                   scratch: *u8, scratch_len: usize, out: *Image) DecodeStatus {
+    if (out == nil) { ret DECODE_BAD_HEADER; }
+
+    var hdr:  PngHeader;
+    var scan: PngScan;
+    val st: DecodeStatus = scan_chunks(src, src_len, ?hdr, ?scan);
+    if (st != DECODE_OK) { ret st; }
+
+    if (dst == nil || scratch == nil) { ret DECODE_SHORT_BUFFER; }
+
+    val need: usize = image_byte_len(hdr.width, hdr.height);
+    if (dst_len < need) { ret DECODE_SHORT_BUFFER; }
+
+    val raw_len: usize = raw_byte_len(?hdr);
+    if (raw_len == 0) { ret DECODE_BAD_HEADER; }
+
+    val scratch_need: usize = scratch_byte_len(?hdr);
+    if (scratch_need == 0)          { ret DECODE_BAD_HEADER; }
+    if (scratch_len < scratch_need) { ret DECODE_SHORT_BUFFER; }
+
+    # the inflate window is bump-allocated out of the head of the caller's
+    # scratch; the raster follows it.
+    var alloc: A.Allocator;
+    var fixed: FIX.FixedState;
+    val mk: O.Option[*u8] = FIX.make(?alloc, ?fixed, scratch, PNG_WINDOW_SCRATCH);
+    if (O.is_some[*u8](mk)) { ret DECODE_SHORT_BUFFER; }
+
+    val zres: R.Result[ZL.Decompressor, str] = ZL.init(?alloc);
+    if (R.is_err[ZL.Decompressor, str](zres)) { ret DECODE_SHORT_BUFFER; }
+    var z: ZL.Decompressor = R.unwrap_ok[ZL.Decompressor, str](zres);
+
+    val raw: *u8 = ?scratch[PNG_WINDOW_SCRATCH];
+    val ist: DecodeStatus = inflate_idat(src, src_len, ?z, raw, raw_len + 1, raw_len);
+    ZL.dnit(?z);
+    if (ist != DECODE_OK) { ret ist; }
+
+    var ctx: PngCtx;
+    ctx.color_type   = hdr.color_type;
+    ctx.depth        = hdr.depth;
+    ctx.has_trns     = scan.has_trns;
+    ctx.plte         = nil;
+    ctx.plte_entries = scan.plte_entries;
+    ctx.trns         = nil;
+    ctx.trns_len     = scan.trns_len;
+    if (scan.has_plte != 0) { ctx.plte = ?src[scan.plte_off]; }
+    if (scan.has_trns != 0) { ctx.trns = ?src[scan.trns_off]; }
+
+    val rst: DecodeStatus = decode_raster(?hdr, ?ctx, raw, raw_len, dst);
+    if (rst != DECODE_OK) { ret rst; }
+
+    var channels: u8 = 3;
+    if (hdr.color_type == PNG_COLOR_GRAY_ALPHA
+        || hdr.color_type == PNG_COLOR_RGBA
+        || scan.has_trns != 0) {
+        channels = 4;
+    }
+
+    out.pixels     = dst;
+    out.width      = hdr.width;
+    out.height     = hdr.height;
+    out.channels   = channels;
+    out.colorspace = COLORSPACE_SRGB;
+    ret DECODE_OK;
+}
+
+# number of stored DEFLATE blocks needed for a byte stream
+#
+# an empty stream still needs one final block even though the PNG encoder never
+# supplies one: valid images always have at least one filter byte and one pixel.
+fun stored_block_count(raw_len: usize) usize {
+    if (raw_len == 0) { ret 1; }
+    var count: usize = raw_len / PNG_STORED_MAX;
+    if (raw_len % PNG_STORED_MAX != 0) { count = count + 1; }
+    ret count;
+}
+
+# encoded size of raw_len bytes as stored DEFLATE blocks, excluding zlib framing
+fun stored_deflate_len(raw_len: usize) usize {
+    val blocks: usize = stored_block_count(raw_len);
+    val overhead: usize = mul_checked(blocks, 5);
+    if (overhead == 0) { ret 0; }
+    ret add_checked(raw_len, overhead);
+}
+
+# begin a PNG chunk and return its payload offset
+fun write_chunk_header(dst: *u8, off: usize, payload_len: usize,
+                       a: u8, b: u8, c: u8, d: u8) usize {
+    write_be32(dst, off, payload_len::u32);
+    dst[off + 4] = a;
+    dst[off + 5] = b;
+    dst[off + 6] = c;
+    dst[off + 7] = d;
+    ret off + 8;
+}
+
+# append a chunk's CRC and return the offset following it
+fun finish_chunk(dst: *u8, off: usize, payload_len: usize) usize {
+    val crc_off: usize = off + 8 + payload_len;
+    val sum: u32 = crc.hash(?dst[off + 4], payload_len + 4);
+    write_be32(dst, crc_off, sum);
+    ret crc_off + 4;
+}
+
+# write one stored-block header for remaining bytes and return its payload size
+#
+# the low header bit is BFINAL and BTYPE is zero. because every stored block
+# starts on a byte boundary, the other five padding bits are written as zero.
+fun write_stored_header(dst: *u8, off: usize, remaining: usize) usize {
+    var block_len: usize = remaining;
+    if (block_len > PNG_STORED_MAX) { block_len = PNG_STORED_MAX; }
+
+    dst[off] = 0;
+    if (remaining <= PNG_STORED_MAX) { dst[off] = 1; }
+
+    val len: u16 = block_len::u16;
+    write_le16(dst, off + 1, len);
+    write_le16(dst, off + 3, len ^ 0xFFFF);
+    ret block_len;
+}
+
+# exact encoded size for a deterministic RGBA8 PNG
+#
+# the output has one filter-0 byte per row and a zlib stream of stored DEFLATE
+# blocks. returns 0 for zero dimensions, arithmetic overflow, or an IDAT payload
+# too large for PNG's 31-bit chunk-length limit.
+# ---
+# width:  image width in pixels
+# height: image height in pixels
+# ret:    exact encoded size in bytes, or 0 if unrepresentable
+pub fun png_encode_bound(width: u32, height: u32) usize {
+    val pixels: usize = image_byte_len(width, height);
+    if (pixels == 0) { ret 0; }
+
+    val raw_len: usize = add_checked(pixels, height::usize);
+    if (raw_len == 0) { ret 0; }
+
+    val deflate_len: usize = stored_deflate_len(raw_len);
+    if (deflate_len == 0) { ret 0; }
+
+    val idat_len: usize = add_checked(deflate_len, PNG_ZLIB_OVER);
+    if (idat_len == 0 || idat_len > PNG_CHUNK_MAX) { ret 0; }
+    ret add_checked(PNG_FILE_FIXED, idat_len);
+}
+
+# encode an RGBA8 Image as a deterministic, allocation-free PNG
+#
+# emits color type 6 at 8 bits per sample, one noninterlaced filter-0 scanline
+# per row, and one IDAT containing a zlib stream of stored DEFLATE blocks. the
+# caller owns both the source pixels and destination. dst must be at least
+# png_encode_bound(width, height) bytes; a shorter buffer is left untouched.
+# ---
+# img:     image whose pixels hold width*height*4 RGBA8 bytes; channels must be
+#          3 or 4, while the informational colorspace hint is not stored
+# dst:     destination buffer for the PNG file
+# dst_len: size of dst in bytes
+# ret:     bytes written, or 0 on invalid input or a short buffer
+pub fun png_encode(img: *Image, dst: *u8, dst_len: usize) usize {
+    if (img == nil || dst == nil || img.pixels == nil) { ret 0; }
+    if (img.channels != 3 && img.channels != 4) { ret 0; }
+
+    val bound: usize = png_encode_bound(img.width, img.height);
+    if (bound == 0 || dst_len < bound) { ret 0; }
+
+    var i: usize = 0;
+    for (i < PNG_SIG_LEN) {
+        dst[i] = PNG_SIGNATURE[i];
+        i = i + 1;
+    }
+
+    val ihdr_off: usize = PNG_SIG_LEN;
+    val ihdr: usize = write_chunk_header(dst, ihdr_off, PNG_IHDR_LEN, 'I', 'H', 'D', 'R');
+    write_be32(dst, ihdr, img.width);
+    write_be32(dst, ihdr + 4, img.height);
+    dst[ihdr + 8]  = 8;
+    dst[ihdr + 9]  = PNG_COLOR_RGBA;
+    dst[ihdr + 10] = 0;
+    dst[ihdr + 11] = 0;
+    dst[ihdr + 12] = 0;
+
+    val idat_off: usize = finish_chunk(dst, ihdr_off, PNG_IHDR_LEN);
+    val raw_len: usize = image_byte_len(img.width, img.height) + img.height::usize;
+    val idat_len: usize = stored_deflate_len(raw_len) + PNG_ZLIB_OVER;
+    var p: usize = write_chunk_header(dst, idat_off, idat_len, 'I', 'D', 'A', 'T');
+
+    # 0x78 0x01 selects DEFLATE with a 32 KiB window, no preset dictionary,
+    # fastest/no compression, and a valid RFC 1950 FCHECK.
+    dst[p]     = 0x78;
+    dst[p + 1] = 0x01;
+    p = p + 2;
+
+    val row_len: usize = img.width::usize * 4 + 1;
+    var row_pos: usize = 0;
+    var pixel_pos: usize = 0;
+    var remaining: usize = raw_len;
+    var checksum: u32 = adler.init();
+
+    for (remaining > 0) {
+        val block_len: usize = write_stored_header(dst, p, remaining);
+        p = p + 5;
+        val block_off: usize = p;
+
+        var n: usize = 0;
+        for (n < block_len) {
+            if (row_pos == 0) {
+                dst[p] = 0;
+            }
+            or {
+                dst[p] = img.pixels[pixel_pos];
+                pixel_pos = pixel_pos + 1;
+            }
+
+            p = p + 1;
+            row_pos = row_pos + 1;
+            if (row_pos == row_len) { row_pos = 0; }
+            n = n + 1;
+        }
+
+        checksum = adler.update(checksum, ?dst[block_off], block_len);
+        remaining = remaining - block_len;
+    }
+
+    write_be32(dst, p, checksum);
+    p = p + 4;
+
+    p = finish_chunk(dst, idat_off, idat_len);
+    val iend_off: usize = p;
+    p = write_chunk_header(dst, iend_off, 0, 'I', 'E', 'N', 'D');
+    p = finish_chunk(dst, iend_off, 0);
+
+    if (p != bound) { ret 0; }
+    ret p;
+}
+
+var png_raw: [256]u8;
+var png_pix: [256]u8;
+var png_work: [33280]u8;   # inflate window plus a small raster
+var png_enc: [4096]u8;
+var png_enc_src: [256]u8;
+var png_enc_rt: [256]u8;
+var png_block_src: [65536]u8;
+var png_block_enc: [65610]u8;
+
+# 1x1 RGBA8 file independently constructed and decoded with Python's zlib
+var png_enc_golden: [73]u8 = [73]u8{
+    137, 80, 78, 71, 13, 10, 26, 10,
+    0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 31, 21, 196, 137,
+    0, 0, 0, 16, 73, 68, 65, 84, 120, 1, 1, 5, 0, 250, 255, 0, 18, 52, 86, 120,
+    2, 13, 1, 21, 178, 100, 30, 196,
+    0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130
+};
+
+# fixture rasters below are the filtered scanline bytes a real encoder emits;
+# the expected pixels were produced by an independent PNG decoder.
+
+# 4x3 RGB8, one image encoded five times, each with every scanline on one filter
+var flt0_raw: [39]u8 = [39]u8{
+    0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 0, 15, 25, 35, 45, 55, 65, 75, 85,
+    95, 105, 115, 125, 0, 200, 150, 100, 90, 80, 70, 60, 50, 40, 30, 20, 10
+};
+var flt1_raw: [39]u8 = [39]u8{
+    1, 10, 20, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 1, 15, 25, 35, 30, 30, 30, 30, 30, 30,
+    30, 30, 30, 1, 200, 150, 100, 146, 186, 226, 226, 226, 226, 226, 226, 226
+};
+var flt2_raw: [39]u8 = [39]u8{
+    2, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 2, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+    5, 2, 185, 125, 65, 45, 25, 5, 241, 221, 201, 181, 161, 141
+};
+var flt3_raw: [39]u8 = [39]u8{
+    3, 10, 20, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 3, 10, 15, 20, 18, 18, 18, 18, 18, 18,
+    18, 18, 18, 3, 193, 138, 83, 224, 234, 244, 234, 224, 214, 204, 194, 184
+};
+var flt4_raw: [39]u8 = [39]u8{
+    4, 10, 20, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+    4, 185, 125, 65, 146, 186, 226, 226, 221, 201, 181, 191, 171
+};
+var flt_expect: [48]u8 = [48]u8{
+    10, 20, 30, 255, 40, 50, 60, 255, 70, 80, 90, 255, 100, 110, 120, 255, 15, 25, 35, 255, 45,
+    55, 65, 255, 75, 85, 95, 255, 105, 115, 125, 255, 200, 150, 100, 255, 90, 80, 70, 255, 60,
+    50, 40, 255, 30, 20, 10, 255
+};
+
+# 7x5 RGB8, odd in both axes so the Adam7 pass extents round up unevenly
+var adam7_progressive_raw: [110]u8 = [110]u8{
+    0, 0, 0, 0, 37, 7, 91, 74, 14, 182, 111, 21, 17, 148, 28, 108, 185, 35, 199, 222, 42, 34,
+    1, 11, 53, 3, 37, 7, 91, 37, 7, 91, 37, 7, 91, 37, 7, 91, 37, 7, 91, 37, 7, 91, 2, 11, 53,
+    3, 11, 53, 3, 11, 53, 3, 11, 53, 3, 11, 53, 3, 11, 53, 3, 11, 53, 3, 3, 22, 106, 6, 24, 30,
+    47, 24, 30, 47, 24, 30, 175, 24, 30, 47, 24, 30, 47, 24, 30, 175, 4, 11, 53, 3, 11, 7, 3,
+    11, 7, 3, 11, 7, 3, 11, 7, 3, 11, 7, 3, 11, 7, 3
+};
+var adam7_interlaced_raw: [116]u8 = [116]u8{
+    0, 0, 0, 0, 0, 148, 28, 108, 0, 44, 212, 12, 192, 240, 120, 0, 74, 14, 182, 222, 42, 34, 1,
+    118, 226, 194, 148, 28, 108, 0, 22, 106, 6, 96, 120, 188, 170, 134, 114, 244, 148, 40, 0,
+    37, 7, 91, 111, 21, 17, 185, 35, 199, 1, 59, 113, 97, 74, 14, 182, 74, 14, 182, 2, 22, 106,
+    6, 22, 106, 6, 22, 106, 6, 0, 11, 53, 3, 48, 60, 94, 85, 67, 185, 122, 74, 20, 159, 81,
+    111, 196, 88, 202, 233, 95, 37, 1, 33, 159, 9, 37, 7, 91, 37, 7, 91, 37, 7, 91, 37, 7, 91,
+    37, 7, 91, 37, 7, 91
+};
+var adam7_expect: [140]u8 = [140]u8{
+    0, 0, 0, 255, 37, 7, 91, 255, 74, 14, 182, 255, 111, 21, 17, 255, 148, 28, 108, 255, 185,
+    35, 199, 255, 222, 42, 34, 255, 11, 53, 3, 255, 48, 60, 94, 255, 85, 67, 185, 255, 122, 74,
+    20, 255, 159, 81, 111, 255, 196, 88, 202, 255, 233, 95, 37, 255, 22, 106, 6, 255, 59, 113,
+    97, 255, 96, 120, 188, 255, 133, 127, 23, 255, 170, 134, 114, 255, 207, 141, 205, 255, 244,
+    148, 40, 255, 33, 159, 9, 255, 70, 166, 100, 255, 107, 173, 191, 255, 144, 180, 26, 255,
+    181, 187, 117, 255, 218, 194, 208, 255, 255, 201, 43, 255, 44, 212, 12, 255, 81, 219, 103,
+    255, 118, 226, 194, 255, 155, 233, 29, 255, 192, 240, 120, 255, 229, 247, 211, 255, 10,
+    254, 46, 255
+};
+
+# 3x2 RGB16; pixel 0 matches tRNS exactly, pixel 5 differs only in a low byte
+var rgb16_raw: [38]u8 = [38]u8{
+    0, 18, 52, 86, 120, 154, 188, 1, 0, 1, 255, 255, 255, 170, 187, 204, 221, 238, 255, 4, 238,
+    204, 170, 136, 102, 68, 128, 0, 128, 137, 230, 2, 104, 121, 138, 120, 26, 186
+};
+var rgb16_trns: [6]u8 = [6]u8{18, 52, 86, 120, 154, 188};
+var rgb16_expect: [24]u8 = [24]u8{
+    18, 86, 154, 0, 1, 1, 255, 255, 170, 204, 238, 255, 0, 0, 0, 255, 128, 128, 128, 255, 18,
+    86, 154, 255
+};
+
+# 4x2 palette8 whose tRNS covers only the first two entries
+var pal8_raw:    [10]u8 = [10]u8{0, 0, 1, 2, 3, 1, 3, 255, 255, 255};
+var pal8_plte:   [12]u8 = [12]u8{255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0};
+var pal8_trns:   [2]u8  = [2]u8{0, 128};
+var pal8_expect: [32]u8 = [32]u8{
+    255, 0, 0, 0, 0, 255, 0, 128, 0, 0, 255, 255, 255, 255, 0, 255, 255, 255, 0, 255, 0, 0,
+    255, 255, 0, 255, 0, 128, 255, 0, 0, 0
+};
+
+# packed samples are MSB-first and each row ends on a byte boundary
+var gray1_raw: [2]u8 = [2]u8{0, 168};
+var gray1_expect: [20]u8 = [20]u8{
+    255, 255, 255, 255, 0, 0, 0, 255, 255, 255, 255, 255, 0, 0, 0, 255, 255, 255, 255, 255
+};
+var gray2_raw: [3]u8 = [3]u8{0, 27, 0};
+var gray2_expect: [20]u8 = [20]u8{
+    0, 0, 0, 255, 85, 85, 85, 255, 170, 170, 170, 255, 255, 255, 255, 255, 0, 0, 0, 255
+};
+var gray4_raw: [3]u8 = [3]u8{0, 10, 240};
+var gray4_trns: [2]u8 = [2]u8{0, 10};
+var gray4_expect: [12]u8 = [12]u8{
+    0, 0, 0, 255, 170, 170, 170, 0, 255, 255, 255, 255
+};
+var pal2_raw: [3]u8 = [3]u8{0, 27, 64};
+var pal2_expect: [20]u8 = [20]u8{
+    255, 0, 0, 0, 0, 255, 0, 128, 0, 0, 255, 255, 255, 255, 0, 255, 0, 255, 0, 128
+};
+
+# 4x2 gray+alpha 8
+var ga8_raw:    [18]u8 = [18]u8{0, 10, 255, 20, 128, 30, 0, 40, 64, 3, 45, 130, 25, 190, 25, 73, 25, 224};
+var ga8_expect: [32]u8 = [32]u8{
+    10, 10, 10, 255, 20, 20, 20, 128, 30, 30, 30, 0, 40, 40, 40, 64, 50, 50, 50, 1, 60, 60, 60,
+    254, 70, 70, 70, 200, 80, 80, 80, 100
+};
+
+# a well-formed 4x2 RGB8 file: 27 IDAT payload bytes over a 26-byte raster
+var file_ok: [84]u8 = [84]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 4, 0, 0, 0, 2, 8, 2,
+    0, 0, 0, 240, 202, 234, 52, 0, 0, 0, 27, 73, 68, 65, 84, 120, 218, 99, 96, 100, 98, 102,
+    97, 101, 99, 231, 224, 228, 226, 230, 97, 228, 229, 227, 103, 134, 1, 0, 7, 220, 0, 149,
+    24, 178, 177, 27, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130
+};
+# the same file with one byte of the IHDR CRC flipped
+var file_bad_crc: [84]u8 = [84]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 4, 0, 0, 0, 2, 8, 2,
+    0, 0, 0, 240, 202, 234, 53, 0, 0, 0, 27, 73, 68, 65, 84, 120, 218, 99, 96, 100, 98, 102,
+    97, 101, 99, 231, 224, 228, 226, 230, 97, 228, 229, 227, 103, 134, 1, 0, 7, 220, 0, 149,
+    24, 178, 177, 27, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130
+};
+# valid zero-length private chunks inserted between IHDR and IDAT; the first is
+# critical and cannot be interpreted, while the second is ancillary and safe
+# to skip.
+var file_unknown_critical: [79]u8 = [79]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+    8, 0, 0, 0, 0, 58, 126, 155, 85, 0, 0, 0, 0, 65, 66, 67, 68, 219, 23, 32, 165, 0, 0, 0,
+    10, 73, 68, 65, 84, 120, 156, 99, 208, 2, 0, 0, 44, 0, 43, 204, 122, 232, 230, 0, 0, 0, 0, 73,
+    69, 78, 68, 174, 66, 96, 130
+};
+var file_unknown_ancillary: [79]u8 = [79]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+    8, 0, 0, 0, 0, 58, 126, 155, 85, 0, 0, 0, 0, 97, 66, 67, 68, 123, 37, 143, 155, 0, 0, 0,
+    10, 73, 68, 65, 84, 120, 156, 99, 208, 2, 0, 0, 44, 0, 43, 204, 122, 232, 230, 0, 0, 0, 0, 73,
+    69, 78, 68, 174, 66, 96, 130
+};
+var file_invalid_chunk_type: [79]u8 = [79]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+    8, 0, 0, 0, 0, 58, 126, 155, 85, 0, 0, 0, 0, 97, 66, 49, 68, 102, 44, 148, 239, 0, 0, 0,
+    10, 73, 68, 65, 84, 120, 156, 99, 208, 2, 0, 0, 44, 0, 43, 204, 122, 232, 230, 0, 0, 0, 0, 73,
+    69, 78, 68, 174, 66, 96, 130
+};
+# PLTE is forbidden for grayscale, and when present must precede tRNS.
+var file_gray_plte: [82]u8 = [82]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+    8, 0, 0, 0, 0, 58, 126, 155, 85, 0, 0, 0, 3, 80, 76, 84, 69, 1, 2, 3, 13, 135, 100, 213,
+    0, 0, 0, 10, 73, 68, 65, 84, 120, 156, 99, 208, 2, 0, 0, 44, 0, 43, 204, 122, 232, 230, 0, 0,
+    0, 0, 73, 69, 78, 68, 174, 66, 96, 130
+};
+var file_trns_before_plte: [102]u8 = [102]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+    8, 2, 0, 0, 0, 144, 119, 83, 222, 0, 0, 0, 6, 116, 82, 78, 83, 0, 1, 0, 2, 0, 3, 201,
+    75, 171, 245, 0, 0, 0, 3, 80, 76, 84, 69, 1, 2, 3, 13, 135, 100, 213, 0, 0, 0, 12, 73, 68,
+    65, 84, 120, 156, 99, 96, 100, 98, 6, 0, 0, 14, 0, 7, 215, 111, 228, 120, 0, 0, 0, 0, 73, 69,
+    78, 68, 174, 66, 96, 130
+};
+# grayscale 42 with tRNS 0xFF2A: the unused high byte must be masked.
+var file_trns_mask: [81]u8 = [81]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+    8, 0, 0, 0, 0, 58, 126, 155, 85, 0, 0, 0, 2, 116, 82, 78, 83, 255, 42, 62, 12, 249, 156, 0,
+    0, 0, 10, 73, 68, 65, 84, 120, 156, 99, 208, 2, 0, 0, 44, 0, 43, 204, 122, 232, 230, 0, 0, 0,
+    0, 73, 69, 78, 68, 174, 66, 96, 130
+};
+var file_rgb_trns_mask: [87]u8 = [87]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+    8, 2, 0, 0, 0, 144, 119, 83, 222, 0, 0, 0, 6, 116, 82, 78, 83, 255, 1, 170, 2, 85, 3, 200,
+    149, 80, 73, 0, 0, 0, 12, 73, 68, 65, 84, 120, 156, 99, 96, 100, 98, 6, 0, 0, 14, 0, 7, 215,
+    111, 228, 120, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130
+};
+var file_gray1: [69]u8 = [69]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 4, 0, 0, 0, 2, 1, 0,
+    0, 0, 0, 87, 211, 64, 206, 0, 0, 0, 12, 73, 68, 65, 84, 120, 218, 99, 216, 192, 224, 1, 0,
+    2, 92, 0, 249, 169, 145, 154, 10, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130
+};
+var file_colortype1: [66]u8 = [66]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 4, 0, 0, 0, 2, 8, 1,
+    0, 0, 0, 226, 127, 69, 218, 0, 0, 0, 9, 73, 68, 65, 84, 120, 218, 99, 0, 0, 0, 1, 0, 1,
+    177, 13, 182, 147, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130
+};
+var file_depth3: [66]u8 = [66]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 4, 0, 0, 0, 2, 3, 2,
+    0, 0, 0, 135, 26, 219, 37, 0, 0, 0, 9, 73, 68, 65, 84, 120, 218, 99, 0, 0, 0, 1, 0, 1, 177,
+    13, 182, 147, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130
+};
+# 0x7FFFFFFF square at 16-bit RGBA: spec-legal dimensions whose raster overflows
+var file_huge: [66]u8 = [66]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 127, 255, 255, 255, 127, 255,
+    255, 255, 16, 6, 0, 0, 0, 68, 89, 215, 37, 0, 0, 0, 9, 73, 68, 65, 84, 120, 218, 99, 0, 0,
+    0, 1, 0, 1, 177, 13, 182, 147, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130
+};
+# focused chunk-ordering cases independent of the corpus fixtures
+var file_no_idat: [45]u8 = [45]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 4, 0, 0, 0, 2, 8, 2,
+    0, 0, 0, 240, 202, 234, 52, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130
+};
+var file_idat_bad_crc: [84]u8 = [84]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 4, 0, 0, 0, 2, 8, 2,
+    0, 0, 0, 240, 202, 234, 52, 0, 0, 0, 27, 73, 68, 65, 84, 120, 218, 99, 96, 100, 98, 102,
+    97, 101, 99, 231, 224, 228, 226, 230, 97, 228, 229, 227, 103, 134, 1, 0, 7, 220, 0, 149,
+    25, 178, 177, 27, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130
+};
+# one zlib stream over two IDAT chunks, split by a tEXt chunk
+var file_split_idat: [111]u8 = [111]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 4, 0, 0, 0, 2, 8, 2,
+    0, 0, 0, 240, 202, 234, 52, 0, 0, 0, 13, 73, 68, 65, 84, 120, 218, 99, 96, 100, 98, 102,
+    97, 101, 99, 231, 224, 228, 153, 32, 169, 225, 0, 0, 0, 3, 116, 69, 88, 116, 107, 0, 118,
+    203, 4, 243, 144, 0, 0, 0, 14, 73, 68, 65, 84, 226, 230, 97, 228, 229, 227, 103, 134, 1, 0,
+    7, 220, 0, 149, 250, 106, 58, 131, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130
+};
+# the same two IDAT chunks left consecutive
+var file_two_idat: [96]u8 = [96]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 4, 0, 0, 0, 2, 8, 2,
+    0, 0, 0, 240, 202, 234, 52, 0, 0, 0, 13, 73, 68, 65, 84, 120, 218, 99, 96, 100, 98, 102,
+    97, 101, 99, 231, 224, 228, 153, 32, 169, 225, 0, 0, 0, 14, 73, 68, 65, 84, 226, 230, 97,
+    228, 229, 227, 103, 134, 1, 0, 7, 220, 0, 149, 250, 106, 58, 131, 0, 0, 0, 0, 73, 69, 78,
+    68, 174, 66, 96, 130
+};
+# the zlib stream is followed by three unused bytes, first in the same final
+# IDAT and then in a separate consecutive IDAT. both are trailing bytes in the
+# concatenated image-data stream and are deliberately ignored.
+var file_trailing_in_idat: [70]u8 = [70]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+    8, 0, 0, 0, 0, 58, 126, 155, 85, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 208, 2, 0, 0,
+    44, 0, 43, 170, 187, 204, 53, 85, 181, 84, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130
+};
+var file_trailing_idat: [82]u8 = [82]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+    8, 0, 0, 0, 0, 58, 126, 155, 85, 0, 0, 0, 10, 73, 68, 65, 84, 120, 156, 99, 208, 2, 0, 0,
+    44, 0, 43, 204, 122, 232, 230, 0, 0, 0, 3, 73, 68, 65, 84, 170, 187, 204, 184, 198, 111, 252, 0, 0,
+    0, 0, 73, 69, 78, 68, 174, 66, 96, 130
+};
+# the IDAT payload is cut short, but its chunk framing and CRC stay valid, so
+# only the deflate stream itself can reveal the truncation
+var file_short_zlib: [76]u8 = [76]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 4, 0, 0, 0, 2, 8, 2,
+    0, 0, 0, 240, 202, 234, 52, 0, 0, 0, 19, 73, 68, 65, 84, 120, 218, 99, 96, 100, 98, 102,
+    97, 101, 99, 231, 224, 228, 226, 230, 97, 228, 229, 227, 136, 126, 108, 165, 0, 0, 0, 0,
+    73, 69, 78, 68, 174, 66, 96, 130
+};
+# complete deflate data whose Adler-32 trailer does not match
+var file_bad_adler: [84]u8 = [84]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 4, 0, 0, 0, 2, 8, 2,
+    0, 0, 0, 240, 202, 234, 52, 0, 0, 0, 27, 73, 68, 65, 84, 120, 218, 99, 96, 100, 98, 102,
+    97, 101, 99, 231, 224, 228, 226, 230, 97, 228, 229, 227, 103, 134, 1, 0, 7, 220, 0, 106,
+    53, 176, 94, 150, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130
+};
+var file_zerodim: [66]u8 = [66]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 0, 0, 0, 0, 2, 8, 2,
+    0, 0, 0, 249, 33, 74, 78, 0, 0, 0, 9, 73, 68, 65, 84, 120, 218, 99, 0, 0, 0, 1, 0, 1, 177,
+    13, 182, 147, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130
+};
+
+# populate a header and context for a raster test; palette and tRNS start empty
+fun test_ctx(hdr: *PngHeader, ctx: *PngCtx, w: u32, h: u32, depth: u8, ct: u8, interlace: u8) {
+    hdr.width      = w;
+    hdr.height     = h;
+    hdr.depth      = depth;
+    hdr.color_type = ct;
+    hdr.interlace  = interlace;
+    hdr.channels   = color_type_channels(ct);
+
+    ctx.color_type   = ct;
+    ctx.depth        = depth;
+    ctx.has_trns     = 0;
+    ctx.plte         = nil;
+    ctx.plte_entries = 0;
+    ctx.trns         = nil;
+    ctx.trns_len     = 0;
+}
+
+# defilter a fixture into png_pix, leaving the fixture itself untouched
+fun run_raster(hdr: *PngHeader, ctx: *PngCtx, raw: *u8, raw_len: usize) DecodeStatus {
+    raw_copy(?png_raw[0], raw, raw_len);
+    ret decode_raster(hdr, ctx, ?png_raw[0], raw_len, ?png_pix[0]);
+}
+
+test "png: every scanline filter reconstructs the same image" {
+    var hdr: PngHeader;
+    var ctx: PngCtx;
+    test_ctx(?hdr, ?ctx, 4, 3, 8, PNG_COLOR_RGB, 0);
+
+    if (run_raster(?hdr, ?ctx, ?flt0_raw[0], 39) != DECODE_OK) { ret 1; }
+    if (!raw_equal(?png_pix[0], ?flt_expect[0], 48)) { ret 1; }
+
+    if (run_raster(?hdr, ?ctx, ?flt1_raw[0], 39) != DECODE_OK) { ret 2; }
+    if (!raw_equal(?png_pix[0], ?flt_expect[0], 48)) { ret 2; }
+
+    if (run_raster(?hdr, ?ctx, ?flt2_raw[0], 39) != DECODE_OK) { ret 3; }
+    if (!raw_equal(?png_pix[0], ?flt_expect[0], 48)) { ret 3; }
+
+    if (run_raster(?hdr, ?ctx, ?flt3_raw[0], 39) != DECODE_OK) { ret 4; }
+    if (!raw_equal(?png_pix[0], ?flt_expect[0], 48)) { ret 4; }
+
+    if (run_raster(?hdr, ?ctx, ?flt4_raw[0], 39) != DECODE_OK) { ret 5; }
+    if (!raw_equal(?png_pix[0], ?flt_expect[0], 48)) { ret 5; }
+    ret 0;
+}
+
+test "png: adam7 and progressive forms of one image agree" {
+    var hdr: PngHeader;
+    var ctx: PngCtx;
+
+    test_ctx(?hdr, ?ctx, 7, 5, 8, PNG_COLOR_RGB, 0);
+    if (run_raster(?hdr, ?ctx, ?adam7_progressive_raw[0], 110) != DECODE_OK) { ret 1; }
+    if (!raw_equal(?png_pix[0], ?adam7_expect[0], 140)) { ret 1; }
+
+    test_ctx(?hdr, ?ctx, 7, 5, 8, PNG_COLOR_RGB, 1);
+    if (run_raster(?hdr, ?ctx, ?adam7_interlaced_raw[0], 116) != DECODE_OK) { ret 2; }
+    if (!raw_equal(?png_pix[0], ?adam7_expect[0], 140)) { ret 2; }
+    ret 0;
+}
+
+test "png: 16-bit samples reduce to the high byte" {
+    var hdr: PngHeader;
+    var ctx: PngCtx;
+    test_ctx(?hdr, ?ctx, 3, 2, 16, PNG_COLOR_RGB, 0);
+    ctx.has_trns = 1;
+    ctx.trns     = ?rgb16_trns[0];
+    ctx.trns_len = 6;
+
+    if (run_raster(?hdr, ?ctx, ?rgb16_raw[0], 38) != DECODE_OK) { ret 1; }
+    if (!raw_equal(?png_pix[0], ?rgb16_expect[0], 24)) { ret 1; }
+    ret 0;
+}
+
+test "png: palette expands through a partial tRNS" {
+    var hdr: PngHeader;
+    var ctx: PngCtx;
+    test_ctx(?hdr, ?ctx, 4, 2, 8, PNG_COLOR_PALETTE, 0);
+    ctx.plte         = ?pal8_plte[0];
+    ctx.plte_entries = 4;
+    ctx.has_trns     = 1;
+    ctx.trns         = ?pal8_trns[0];
+    ctx.trns_len     = 2;
+
+    if (run_raster(?hdr, ?ctx, ?pal8_raw[0], 10) != DECODE_OK) { ret 1; }
+    if (!raw_equal(?png_pix[0], ?pal8_expect[0], 32)) { ret 1; }
+    ret 0;
+}
+
+test "png: sub-byte grayscale unpacks and scales stored samples" {
+    var hdr: PngHeader;
+    var ctx: PngCtx;
+
+    test_ctx(?hdr, ?ctx, 5, 1, 1, PNG_COLOR_GRAY, 0);
+    if (run_raster(?hdr, ?ctx, ?gray1_raw[0], 2) != DECODE_OK) { ret 1; }
+    if (!raw_equal(?png_pix[0], ?gray1_expect[0], 20)) { ret 1; }
+
+    test_ctx(?hdr, ?ctx, 5, 1, 2, PNG_COLOR_GRAY, 0);
+    if (run_raster(?hdr, ?ctx, ?gray2_raw[0], 3) != DECODE_OK) { ret 2; }
+    if (!raw_equal(?png_pix[0], ?gray2_expect[0], 20)) { ret 2; }
+
+    test_ctx(?hdr, ?ctx, 3, 1, 4, PNG_COLOR_GRAY, 0);
+    ctx.has_trns = 1;
+    ctx.trns     = ?gray4_trns[0];
+    ctx.trns_len = 2;
+    if (run_raster(?hdr, ?ctx, ?gray4_raw[0], 3) != DECODE_OK) { ret 3; }
+    if (!raw_equal(?png_pix[0], ?gray4_expect[0], 12)) { ret 3; }
+    ret 0;
+}
+
+test "png: sub-byte palette uses row padding and partial tRNS" {
+    var hdr: PngHeader;
+    var ctx: PngCtx;
+    test_ctx(?hdr, ?ctx, 5, 1, 2, PNG_COLOR_PALETTE, 0);
+    ctx.plte         = ?pal8_plte[0];
+    ctx.plte_entries = 4;
+    ctx.has_trns     = 1;
+    ctx.trns         = ?pal8_trns[0];
+    ctx.trns_len     = 2;
+
+    if (run_raster(?hdr, ?ctx, ?pal2_raw[0], 3) != DECODE_OK) { ret 1; }
+    if (!raw_equal(?png_pix[0], ?pal2_expect[0], 20)) { ret 1; }
+    ret 0;
+}
+
+test "png: gray+alpha carries its alpha channel" {
+    var hdr: PngHeader;
+    var ctx: PngCtx;
+    test_ctx(?hdr, ?ctx, 4, 2, 8, PNG_COLOR_GRAY_ALPHA, 0);
+
+    if (run_raster(?hdr, ?ctx, ?ga8_raw[0], 18) != DECODE_OK) { ret 1; }
+    if (!raw_equal(?png_pix[0], ?ga8_expect[0], 32)) { ret 1; }
+    ret 0;
+}
+
+test "png: raster rejects a short raw buffer" {
+    var hdr: PngHeader;
+    var ctx: PngCtx;
+    test_ctx(?hdr, ?ctx, 4, 3, 8, PNG_COLOR_RGB, 0);
+    # one scanline short of the three the header declares
+    if (run_raster(?hdr, ?ctx, ?flt0_raw[0], 26) != DECODE_TRUNCATED) { ret 1; }
+    ret 0;
+}
+
+test "png: raster rejects an undefined filter type" {
+    var hdr: PngHeader;
+    var ctx: PngCtx;
+    test_ctx(?hdr, ?ctx, 4, 3, 8, PNG_COLOR_RGB, 0);
+
+    raw_copy(?png_raw[0], ?flt0_raw[0], 39);
+    png_raw[0] = 5;   # only 0-4 are defined
+    if (decode_raster(?hdr, ?ctx, ?png_raw[0], 39, ?png_pix[0]) != DECODE_CORRUPT) { ret 1; }
+    ret 0;
+}
+
+test "png: raster rejects a palette index past the palette" {
+    var hdr: PngHeader;
+    var ctx: PngCtx;
+    test_ctx(?hdr, ?ctx, 4, 2, 8, PNG_COLOR_PALETTE, 0);
+    ctx.plte         = ?pal8_plte[0];
+    ctx.plte_entries = 2;   # the fixture indexes entries 0-3
+
+    if (run_raster(?hdr, ?ctx, ?pal8_raw[0], 10) != DECODE_CORRUPT) { ret 1; }
+    ret 0;
+}
+
+test "png: info reads a well-formed header" {
+    var img: Image;
+    if (png_info(?file_ok[0], 84, ?img) != DECODE_OK) { ret 1; }
+    if (img.width != 4 || img.height != 2) { ret 1; }
+    if (img.channels != 3) { ret 1; }
+    if (img.pixels != nil) { ret 1; }
+    ret 0;
+}
+
+test "png: info rejects a bad signature" {
+    var img: Image;
+    raw_copy(?png_raw[0], ?file_ok[0], 84);
+    png_raw[1] = 'X';
+    if (png_info(?png_raw[0], 84, ?img) != DECODE_BAD_MAGIC) { ret 1; }
+    ret 0;
+}
+
+test "png: info rejects a bad chunk crc" {
+    var img: Image;
+    if (png_info(?file_bad_crc[0], 84, ?img) != DECODE_CORRUPT) { ret 1; }
+    ret 0;
+}
+
+test "png: unknown chunks honor the critical bit" {
+    var img: Image;
+    if (png_info(?file_unknown_critical[0], 79, ?img) != DECODE_UNSUPPORTED) { ret 1; }
+    if (png_scratch_len(?file_unknown_critical[0], 79) != 0)                { ret 2; }
+    if (png_info(?file_unknown_ancillary[0], 79, ?img) != DECODE_OK)        { ret 3; }
+    if (png_decode(?file_unknown_ancillary[0], 79, ?png_pix[0], 256,
+                   ?png_work[0], 33280, ?img) != DECODE_OK)                 { ret 4; }
+    if (png_pix[0] != 42 || png_pix[1] != 42 || png_pix[2] != 42 || png_pix[3] != 255) { ret 5; }
+    if (png_info(?file_invalid_chunk_type[0], 79, ?img) != DECODE_BAD_HEADER) { ret 6; }
+    ret 0;
+}
+
+test "png: info enforces PLTE placement and color types" {
+    var img: Image;
+    if (png_info(?file_gray_plte[0], 82, ?img) != DECODE_BAD_HEADER)       { ret 1; }
+    if (png_info(?file_trns_before_plte[0], 102, ?img) != DECODE_BAD_HEADER) { ret 2; }
+    ret 0;
+}
+
+test "png: tRNS masks bits above the image depth" {
+    var img: Image;
+    if (png_decode(?file_trns_mask[0], 81, ?png_pix[0], 256,
+                   ?png_work[0], 33280, ?img) != DECODE_OK) { ret 1; }
+    if (img.channels != 4)                                  { ret 2; }
+    if (png_pix[0] != 42 || png_pix[1] != 42 || png_pix[2] != 42 || png_pix[3] != 0) { ret 3; }
+
+    if (png_decode(?file_rgb_trns_mask[0], 87, ?png_pix[0], 256,
+                   ?png_work[0], 33280, ?img) != DECODE_OK) { ret 4; }
+    if (png_pix[0] != 1 || png_pix[1] != 2 || png_pix[2] != 3 || png_pix[3] != 0) { ret 5; }
+    ret 0;
+}
+
+test "png: info rejects a truncated stream" {
+    var img: Image;
+    if (png_info(?file_ok[0], 40, ?img) != DECODE_TRUNCATED) { ret 1; }
+    if (png_info(?file_ok[0], 4, ?img) != DECODE_TRUNCATED)  { ret 1; }
+    ret 0;
+}
+
+test "png: sub-byte grayscale decodes through the public API" {
+    var img: Image;
+    if (png_info(?file_gray1[0], 69, ?img) != DECODE_OK) { ret 1; }
+    if (img.width != 4 || img.height != 2 || img.channels != 3) { ret 2; }
+    if (png_decode(?file_gray1[0], 69, ?png_pix[0], 256,
+                   ?png_work[0], 33280, ?img) != DECODE_OK) { ret 3; }
+    if (png_pix[0] != 255 || png_pix[4] != 0 || png_pix[8] != 255 || png_pix[12] != 255) { ret 4; }
+    if (png_pix[16] != 0 || png_pix[20] != 255 || png_pix[24] != 0 || png_pix[28] != 0) { ret 5; }
+    ret 0;
+}
+
+test "png: info rejects undefined header fields" {
+    var img: Image;
+    if (png_info(?file_colortype1[0], 66, ?img) != DECODE_BAD_HEADER) { ret 1; }
+    if (png_info(?file_depth3[0], 66, ?img) != DECODE_BAD_HEADER)     { ret 1; }
+    if (png_info(?file_zerodim[0], 66, ?img) != DECODE_BAD_HEADER)    { ret 1; }
+    ret 0;
+}
+
+test "png: info rejects dimensions whose raster overflows" {
+    var img: Image;
+    if (png_info(?file_huge[0], 66, ?img) != DECODE_BAD_HEADER) { ret 1; }
+    if (png_scratch_len(?file_huge[0], 66) != 0) { ret 1; }
+    ret 0;
+}
+
+test "png: info enforces the chunk ordering rules" {
+    var img: Image;
+    if (png_info(?file_no_idat[0], 45, ?img) != DECODE_BAD_HEADER)      { ret 1; }
+    if (png_info(?file_idat_bad_crc[0], 84, ?img) != DECODE_CORRUPT)    { ret 2; }
+    if (png_info(?file_split_idat[0], 111, ?img) != DECODE_BAD_HEADER)  { ret 3; }
+    # the same two chunks are fine when nothing breaks the run
+    if (png_info(?file_two_idat[0], 96, ?img) != DECODE_OK)             { ret 4; }
+    ret 0;
+}
+
+test "png: scratch_len covers the window and the raster" {
+    # 4x2 RGB8 filters to 2 * (1 + 12) = 26 raster bytes, plus the spare byte
+    # that catches an over-long stream, on top of the inflate window.
+    if (png_scratch_len(?file_ok[0], 84) != PNG_WINDOW_SCRATCH + 27) { ret 1; }
+    if (png_scratch_len(?file_two_idat[0], 96) != PNG_WINDOW_SCRATCH + 27) { ret 2; }
+    if (png_scratch_len(?file_bad_crc[0], 84) != 0) { ret 3; }
+    ret 0;
+}
+
+test "png: decode a whole file end to end" {
+    var img: Image;
+    val scratch_need: usize = png_scratch_len(?file_ok[0], 84);
+    if (scratch_need == 0 || scratch_need > 33280) { ret 1; }
+
+    if (png_decode(?file_ok[0], 84, ?png_pix[0], 256, ?png_work[0], 33280, ?img) != DECODE_OK) { ret 2; }
+    if (img.width != 4 || img.height != 2 || img.channels != 3) { ret 3; }
+    if (img.pixels != ?png_pix[0]) { ret 4; }
+
+    # the file stores 1..24 as two RGB8 scanlines, so every pixel is opaque
+    var i: usize = 0;
+    for (i < 8) {
+        if (png_pix[i * 4]     != (i * 3 + 1)::u8) { ret 5; }
+        if (png_pix[i * 4 + 1] != (i * 3 + 2)::u8) { ret 5; }
+        if (png_pix[i * 4 + 2] != (i * 3 + 3)::u8) { ret 5; }
+        if (png_pix[i * 4 + 3] != 255)             { ret 5; }
+        i = i + 1;
+    }
+    ret 0;
+}
+
+test "png: decode reassembles a zlib stream split across IDAT chunks" {
+    var img: Image;
+    if (png_decode(?file_two_idat[0], 96, ?png_pix[0], 256, ?png_work[0], 33280, ?img) != DECODE_OK) { ret 1; }
+    var i: usize = 0;
+    for (i < 8) {
+        if (png_pix[i * 4] != (i * 3 + 1)::u8) { ret 2; }
+        i = i + 1;
+    }
+    ret 0;
+}
+
+test "png: decode ignores unused trailing IDAT bytes" {
+    var img: Image;
+    if (png_decode(?file_trailing_in_idat[0], 70, ?png_pix[0], 256,
+                   ?png_work[0], 33280, ?img) != DECODE_OK) { ret 1; }
+    if (png_pix[0] != 42 || png_pix[1] != 42 || png_pix[2] != 42 || png_pix[3] != 255) { ret 2; }
+
+    if (png_decode(?file_trailing_idat[0], 82, ?png_pix[0], 256,
+                   ?png_work[0], 33280, ?img) != DECODE_OK) { ret 3; }
+    if (png_pix[0] != 42 || png_pix[1] != 42 || png_pix[2] != 42 || png_pix[3] != 255) { ret 4; }
+    ret 0;
+}
+
+test "png: decode rejects short destination and scratch" {
+    var img: Image;
+    if (png_decode(?file_ok[0], 84, ?png_pix[0], 4, ?png_work[0], 33280, ?img) != DECODE_SHORT_BUFFER) { ret 1; }
+    if (png_decode(?file_ok[0], 84, ?png_pix[0], 256, ?png_work[0], 64, ?img) != DECODE_SHORT_BUFFER)  { ret 2; }
+    if (png_decode(?file_ok[0], 84, nil, 256, ?png_work[0], 33280, ?img) != DECODE_SHORT_BUFFER)       { ret 3; }
+
+    # png_scratch_len is exact, not a lower bound: one byte less must be refused
+    # and exactly that many must succeed.
+    val need: usize = png_scratch_len(?file_ok[0], 84);
+    if (need == 0 || need > 33280) { ret 4; }
+    if (png_decode(?file_ok[0], 84, ?png_pix[0], 256, ?png_work[0], need - 1, ?img) != DECODE_SHORT_BUFFER) { ret 5; }
+    if (png_decode(?file_ok[0], 84, ?png_pix[0], 256, ?png_work[0], need, ?img) != DECODE_OK)               { ret 6; }
+    ret 0;
+}
+
+test "png: decode rejects a corrupted zlib stream" {
+    var img: Image;
+    # flip a byte inside the IDAT payload, leaving the chunk CRC to catch it
+    raw_copy(?png_raw[0], ?file_ok[0], 84);
+    png_raw[45] = png_raw[45] ^ 0xFF;
+    if (png_decode(?png_raw[0], 84, ?png_pix[0], 256, ?png_work[0], 33280, ?img) != DECODE_CORRUPT) { ret 1; }
+    ret 0;
+}
+
+test "png: decode rejects an incomplete zlib stream" {
+    # the chunk framing is intact here, so the truncation is only visible once
+    # the deflate stream ends without reaching its final block
+    var img: Image;
+    if (png_decode(?file_short_zlib[0], 76, ?png_pix[0], 256, ?png_work[0], 33280, ?img) != DECODE_TRUNCATED) { ret 1; }
+    ret 0;
+}
+
+test "png: decode rejects a bad adler-32 trailer" {
+    var img: Image;
+    if (png_decode(?file_bad_adler[0], 84, ?png_pix[0], 256, ?png_work[0], 33280, ?img) != DECODE_CORRUPT) { ret 1; }
+    ret 0;
+}
+
+test "png: chunk crc matches known values" {
+    var ihdr: [4]u8 = [4]u8{'I', 'H', 'D', 'R'};
+    if (crc.hash(?ihdr[0], 4) != 0xA8A1AE0A) { ret 1; }
+    var iend: [4]u8 = [4]u8{'I', 'E', 'N', 'D'};
+    if (crc.hash(?iend[0], 4) != 0xAE426082) { ret 1; }
+    ret 0;
+}
+
+test "png: adam7 pass extents cover every pixel" {
+    # the seven passes partition the image, so their areas must sum to w*h.
+    var w: usize = 1;
+    for (w <= 16) {
+        var h: usize = 1;
+        for (h <= 16) {
+            var total: usize = 0;
+            var p: usize = 0;
+            for (p < 7) {
+                total = total + pass_extent(w, adam7_x_start[p]::usize, adam7_x_step[p]::usize)
+                              * pass_extent(h, adam7_y_start[p]::usize, adam7_y_step[p]::usize);
+                p = p + 1;
+            }
+            if (total != w * h) { ret 1; }
+            h = h + 1;
+        }
+        w = w + 1;
+    }
+    ret 0;
+}
+
+test "png: encode matches an independently decoded golden" {
+    png_enc_src[0] = 0x12;
+    png_enc_src[1] = 0x34;
+    png_enc_src[2] = 0x56;
+    png_enc_src[3] = 0x78;
+
+    var src: Image;
+    src.pixels     = ?png_enc_src[0];
+    src.width      = 1;
+    src.height     = 1;
+    src.channels   = 4;
+    src.colorspace = COLORSPACE_SRGB;
+
+    if (png_encode_bound(1, 1) != 73) { ret 1; }
+    val n: usize = png_encode(?src, ?png_enc[0], 4096);
+    if (n != 73) { ret 2; }
+    if (!raw_equal(?png_enc[0], ?png_enc_golden[0], 73)) { ret 3; }
+
+    # the exact file also pins chunk layout, CRCs, zlib framing, and Adler-32.
+    if (read_be32(?png_enc[0], 8) != 13 || read_be32(?png_enc[0], 33) != 16) { ret 4; }
+    if (crc.hash(?png_enc[12], 17) != read_be32(?png_enc[0], 29)) { ret 5; }
+    if (crc.hash(?png_enc[37], 20) != read_be32(?png_enc[0], 57)) { ret 6; }
+    if (png_enc[41] != 0x78 || png_enc[42] != 0x01) { ret 7; }
+    if (read_be32(?png_enc[0], 53) != 0x020D0115) { ret 8; }
+    if (crc.hash(?png_enc[65], 4) != read_be32(?png_enc[0], 69)) { ret 9; }
+    ret 0;
+}
+
+test "png: encode then decode round-trips RGBA8" {
+    val w: u32 = 8;
+    val h: u32 = 8;
+    val bytes: usize = image_byte_len(w, h);
+    var i: usize = 0;
+    for (i < bytes) {
+        png_enc_src[i] = (i * 37 + i / 4 * 11)::u8;
+        i = i + 1;
+    }
+
+    var src: Image;
+    src.pixels     = ?png_enc_src[0];
+    src.width      = w;
+    src.height     = h;
+    src.channels   = 4;
+    src.colorspace = COLORSPACE_LINEAR;
+
+    val bound: usize = png_encode_bound(w, h);
+    if (bound == 0 || bound > 4096) { ret 1; }
+    val n: usize = png_encode(?src, ?png_enc[0], 4096);
+    if (n != bound) { ret 2; }
+
+    var info: Image;
+    if (png_info(?png_enc[0], n, ?info) != DECODE_OK) { ret 3; }
+    if (info.width != w || info.height != h || info.channels != 4
+        || info.colorspace != COLORSPACE_SRGB) { ret 4; }
+
+    val scratch: usize = png_scratch_len(?png_enc[0], n);
+    if (scratch == 0 || scratch > 33280) { ret 5; }
+    if (png_decode(?png_enc[0], n, ?png_enc_rt[0], 256,
+                   ?png_work[0], scratch, ?info) != DECODE_OK) { ret 6; }
+    if (!raw_equal(?png_enc_src[0], ?png_enc_rt[0], bytes)) { ret 7; }
+    ret 0;
+}
+
+test "png: encode rejects invalid input and short buffers without writing" {
+    png_enc_src[0] = 1;
+    png_enc_src[1] = 2;
+    png_enc_src[2] = 3;
+    png_enc_src[3] = 4;
+
+    var src: Image;
+    src.pixels     = ?png_enc_src[0];
+    src.width      = 1;
+    src.height     = 1;
+    src.channels   = 4;
+    src.colorspace = COLORSPACE_SRGB;
+
+    var i: usize = 0;
+    for (i < 73) { png_enc[i] = 0xA5; i = i + 1; }
+    if (png_encode(?src, ?png_enc[0], 72) != 0) { ret 1; }
+    i = 0;
+    for (i < 73) {
+        if (png_enc[i] != 0xA5) { ret 2; }
+        i = i + 1;
+    }
+
+    if (png_encode(nil, ?png_enc[0], 73) != 0) { ret 3; }
+    if (png_encode(?src, nil, 73) != 0) { ret 4; }
+    src.pixels = nil;
+    if (png_encode(?src, ?png_enc[0], 73) != 0) { ret 5; }
+    src.pixels = ?png_enc_src[0];
+    src.channels = 2;
+    if (png_encode(?src, ?png_enc[0], 73) != 0) { ret 6; }
+    ret 0;
+}
+
+test "png: encode bound rejects zero and unrepresentable dimensions" {
+    if (png_encode_bound(0, 1) != 0) { ret 1; }
+    if (png_encode_bound(1, 0) != 0) { ret 2; }
+    if (png_encode_bound(0xFFFFFFFF, 0xFFFFFFFF) != 0) { ret 3; }
+    # even where usize can represent the raster, one IDAT cannot exceed 2^31-1.
+    if (png_encode_bound(0xFFFFFFFF, 1) != 0) { ret 4; }
+    ret 0;
+}
+
+test "png: stored block headers cover empty and length boundaries" {
+    if (stored_block_count(0) != 1 || stored_deflate_len(0) != 5) { ret 1; }
+    if (stored_block_count(1) != 1 || stored_deflate_len(1) != 6) { ret 2; }
+    if (stored_block_count(65535) != 1 || stored_deflate_len(65535) != 65540) { ret 3; }
+    if (stored_block_count(65536) != 2 || stored_deflate_len(65536) != 65546) { ret 4; }
+
+    if (write_stored_header(?png_raw[0], 0, 0) != 0) { ret 5; }
+    if (png_raw[0] != 1 || png_raw[1] != 0 || png_raw[2] != 0
+        || png_raw[3] != 255 || png_raw[4] != 255) { ret 6; }
+
+    if (write_stored_header(?png_raw[0], 0, 1) != 1) { ret 7; }
+    if (png_raw[0] != 1 || png_raw[1] != 1 || png_raw[2] != 0
+        || png_raw[3] != 254 || png_raw[4] != 255) { ret 8; }
+
+    if (write_stored_header(?png_raw[0], 0, 65535) != 65535) { ret 9; }
+    if (png_raw[0] != 1 || png_raw[1] != 255 || png_raw[2] != 255
+        || png_raw[3] != 0 || png_raw[4] != 0) { ret 10; }
+
+    if (write_stored_header(?png_raw[0], 0, 65536) != 65535) { ret 11; }
+    if (png_raw[0] != 0 || png_raw[1] != 255 || png_raw[2] != 255
+        || png_raw[3] != 0 || png_raw[4] != 0) { ret 12; }
+    ret 0;
+}
+
+test "png: encode marks an exact 65535-byte stored block final" {
+    var i: usize = 0;
+    for (i < 52428) {
+        png_block_src[i] = (i * 29 + 7)::u8;
+        i = i + 1;
+    }
+
+    var src: Image;
+    src.pixels     = ?png_block_src[0];
+    src.width      = 1;
+    src.height     = 13107;
+    src.channels   = 4;
+    src.colorspace = COLORSPACE_SRGB;
+
+    if (png_encode_bound(src.width, src.height) != 65603) { ret 1; }
+    if (png_encode(?src, ?png_block_enc[0], 65610) != 65603) { ret 2; }
+    if (read_be32(?png_block_enc[0], 33) != 65546) { ret 3; }
+
+    # zlib header, one final stored header, LEN, and NLEN.
+    if (png_block_enc[41] != 0x78 || png_block_enc[42] != 0x01) { ret 4; }
+    if (png_block_enc[43] != 1 || png_block_enc[44] != 255 || png_block_enc[45] != 255
+        || png_block_enc[46] != 0 || png_block_enc[47] != 0) { ret 5; }
+
+    # width 1 makes each raw row exactly filter byte + four source bytes.
+    if (png_block_enc[48] != 0 || png_block_enc[49] != png_block_src[0]
+        || png_block_enc[53] != 0 || png_block_enc[54] != png_block_src[4]) { ret 6; }
+
+    if (read_be32(?png_block_enc[0], 65583) != adler.hash(?png_block_enc[48], 65535)) { ret 7; }
+    if (read_be32(?png_block_enc[0], 65587) != crc.hash(?png_block_enc[37], 65550)) { ret 8; }
+    ret 0;
+}
+
+test "png: encode splits stored data after 65535 bytes" {
+    var i: usize = 0;
+    for (i < 65536) {
+        png_block_src[i] = (i * 17 + i / 251)::u8;
+        i = i + 1;
+    }
+
+    var src: Image;
+    src.pixels     = ?png_block_src[0];
+    src.width      = 16384;
+    src.height     = 1;
+    src.channels   = 4;
+    src.colorspace = COLORSPACE_SRGB;
+
+    if (png_encode_bound(src.width, src.height) != 65610) { ret 1; }
+    if (png_encode(?src, ?png_block_enc[0], 65610) != 65610) { ret 2; }
+    if (read_be32(?png_block_enc[0], 33) != 65553) { ret 3; }
+
+    # the first full block is non-final and the second carries the last 2 bytes.
+    if (png_block_enc[43] != 0 || png_block_enc[44] != 255 || png_block_enc[45] != 255
+        || png_block_enc[46] != 0 || png_block_enc[47] != 0) { ret 4; }
+    if (png_block_enc[65583] != 1 || png_block_enc[65584] != 2 || png_block_enc[65585] != 0
+        || png_block_enc[65586] != 253 || png_block_enc[65587] != 255) { ret 5; }
+    if (png_block_enc[65588] != png_block_src[65534]
+        || png_block_enc[65589] != png_block_src[65535]) { ret 6; }
+
+    var sum: u32 = adler.init();
+    sum = adler.update(sum, ?png_block_enc[48], 65535);
+    sum = adler.update(sum, ?png_block_enc[65588], 2);
+    if (read_be32(?png_block_enc[0], 65590) != sum) { ret 7; }
+    if (read_be32(?png_block_enc[0], 65594) != crc.hash(?png_block_enc[37], 65557)) { ret 8; }
+    ret 0;
+}

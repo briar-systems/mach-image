@@ -8,6 +8,7 @@ use image.format;
 use image.codec;
 use image.qoi;
 use image.tga;
+use image.png;
 # links the startup entrypoint so `mach test` over this library produces a binary.
 use std.runtime;
 
@@ -33,6 +34,7 @@ fwd codec.DECODE_BAD_MAGIC;
 fwd codec.DECODE_BAD_HEADER;
 fwd codec.DECODE_SHORT_BUFFER;
 fwd codec.DECODE_UNSUPPORTED;
+fwd codec.DECODE_CORRUPT;
 fwd codec.decode_status_name;
 
 fwd qoi.qoi_info;
@@ -44,3 +46,15 @@ fwd tga.tga_info;
 fwd tga.tga_decode;
 fwd tga.tga_encode;
 fwd tga.tga_encode_bound;
+
+fwd png.png_info;
+fwd png.png_decode;
+fwd png.png_scratch_len;
+fwd png.png_encode;
+fwd png.png_encode_bound;
+fwd png.PNG_SIGNATURE;
+fwd png.PNG_COLOR_GRAY;
+fwd png.PNG_COLOR_RGB;
+fwd png.PNG_COLOR_PALETTE;
+fwd png.PNG_COLOR_GRAY_ALPHA;
+fwd png.PNG_COLOR_RGBA;

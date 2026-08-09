@@ -27,6 +27,19 @@ Decode and encode the raster image formats the engine and tooling actually
 need. Decoders are the priority; encoding covers the formats used to emit
 images from the toolchain (screenshots, generated assets).
 
+## Formats
+
+| Format | Decode | Encode | Notes |
+|---|---|---|---|
+| QOI | all chunk types | yes | spec-complete, round-trips |
+| TGA | truecolor types 2 and 10, 24- and 32-bit | 32-bit uncompressed | color-mapped and grayscale variants are rejected, not decoded |
+| PNG | every spec-defined bit depth across all five color types, filters 0-4, Adam7 interlace, tRNS | RGBA8, filter 0, stored DEFLATE | allocation-free deterministic output; 1/2/4-bit samples decode MSB-first; every chunk CRC is validated |
+| JPEG | — | — | not started |
+
+A decoder rejects a variant it does not implement rather than producing
+approximate pixels, so an unsupported configuration is always a typed
+`DecodeStatus` and never silent corruption.
+
 ## Goals
 
 - Decoders, in priority order:
@@ -34,9 +47,8 @@ images from the toolchain (screenshots, generated assets).
     slice for the codec surface.
   - **TGA** — next: uncompressed and RLE variants, still no external
     dependencies.
-  - **PNG** — after TGA. PNG decoding needs DEFLATE, so it is **blocked on
-    `inflate` landing in [mach-std](https://github.com/briar-systems/mach-std)**;
-    the codec lands once that dependency is available.
+  - **PNG** — third: every valid bit depth across every color type, backed by
+    mach-std's DEFLATE implementation and the PngSuite corpus.
   - **JPEG** — later, once the lossless formats are solid.
 - Encoders for at least **QOI** and **PNG**, sized for tooling use
   (screenshots, generated assets) rather than exhaustive option coverage.
@@ -71,6 +83,8 @@ src/
   codec.mach    the shared Image type, colorspace hints, size and status helpers
   qoi.mach      QOI decoder and encoder
   tga.mach      TGA truecolor decoder (types 2 and 10) and a minimal encoder
+  png.mach      PNG decoder and deterministic allocation-free RGBA8 encoder
+  pngsuite.mach the embedded PngSuite corpus and the tests that run it
 ```
 
 `codec.mach` defines the library's common currency: an `Image` is an RGBA8
@@ -84,8 +98,20 @@ Each codec lands as its own module (`qoi.mach`, `tga.mach`, ...) exposing its
 decode/encode entry points and buffer-sizing helpers, re-exported through
 `image.mach` so a bare `use image;` reaches the whole API under one namespace.
 
+The PNG writer sizes caller-owned storage with
+`png_encode_bound(width, height)` and writes with
+`png_encode(img, dst, dst_len)`. It emits one portable subset: RGBA8,
+noninterlaced scanlines using filter 0, wrapped in a zlib stream of stored
+DEFLATE blocks. This keeps the first encoder allocation-free and dependency-free
+at the cost of compression; a future compressor can fit behind the same API.
+The informational `Image.colorspace` hint is not serialized because this subset
+has no ancillary color-management chunks, and pixel bytes are never converted.
+
 ## Tests
 
 `test` blocks are self-contained and display-free: codec round-trips and
-decode/encode against known-good fixtures, run by `mach test .`. CI fetches the
-latest released Mach compiler and runs the suite on every pull request.
+decode/encode against known-good fixtures, run by `mach test .`. The PNG
+encoder's deterministic golden is also parsed and decompressed by Python's
+maintained zlib through `tools/verify_png_encoder.py`, so encoder correctness is
+not established solely by mach-image's decoder. CI fetches the latest released
+Mach compiler and runs both checks on every pull request.
