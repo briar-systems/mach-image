@@ -8,8 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- png: A PNG decoder. Chunk framing with the ordering and type rules enforced,
+  scanline defiltering, Adam7 interlace, sub-byte sample depths, transparency
+  keys including the narrow-key masking RGB needs, and IDAT inflated through
+  `std.compress.zlib`. Checked against the PngSuite corpus plus property tests
+  for the cases a corpus cannot reach.
 - png: Deterministic, allocation-free RGBA8 encoding with filter-0 scanlines
   and stored DEFLATE blocks.
+- codec: `DECODE_CORRUPT`, so an integrity failure is distinguishable from an
+  unsupported format. A decoder that answers "no" the same way for both leaves
+  a caller unable to tell a broken file from one it never handled.
+- format: PNG is detected by signature, and the format matrix is documented.
 
 ### Changed
 - manifest: Re-touched to RFC-exact totality per mach#1964/mach#1979.
