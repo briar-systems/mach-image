@@ -1,29 +1,35 @@
 # identifiers for the image formats mach-image handles, and
 # best-effort detection from a byte prefix
 
+use std.types.option.opt;
 use std.types.size.usize;
 use std.types.string.str;
 use std.types.string.str_equals;
+use image.codec.same_case;
 use image.png.PNG_SIGNATURE;
 
-# format tags; FORMAT_UNKNOWN is the zero value for an unrecognized or
-# not-yet-detected format
-pub val FORMAT_UNKNOWN: u8 = 0;
-pub val FORMAT_QOI:     u8 = 1;
-pub val FORMAT_TGA:     u8 = 2;
-pub val FORMAT_PNG:     u8 = 3;
-pub val FORMAT_JPEG:    u8 = 4;
-
-# the lowercase short name of a format tag, or "unknown"
+# an image container format
 # ---
-# format: a FORMAT_* tag
+# qoi:  Quite OK Image
+# tga:  Truevision TGA
+# png:  Portable Network Graphics
+# jpeg: JPEG/JFIF, recognized by its start-of-image marker but not yet decoded
+pub tag Format: u8 {
+    qoi;
+    tga;
+    png;
+    jpeg;
+}
+
+# the lowercase short name of a format
+# ---
+# format: the format to name
 # ret:    the format's short name
-pub fun format_name(format: u8) str {
-    if (format == FORMAT_QOI)  { ret "qoi"; }
-    if (format == FORMAT_TGA)  { ret "tga"; }
-    if (format == FORMAT_PNG)  { ret "png"; }
-    if (format == FORMAT_JPEG) { ret "jpeg"; }
-    ret "unknown";
+pub fun format_name(format: Format) str {
+    if (sel format.qoi) { ret "qoi"; }
+    if (sel format.tga) { ret "tga"; }
+    if (sel format.png) { ret "png"; }
+    ret "jpeg";
 }
 
 # the 18-byte signature of a TGA 2.0 file footer
@@ -63,18 +69,17 @@ fun looks_like_tga(src: *u8, src_len: usize) u8 {
 
 # best-effort identification of an image format from its leading bytes
 #
-# QOI and PNG are identified by their magic. TGA has no magic, so it is
+# QOI, PNG and JPEG are identified by their magic. TGA has no magic, so it is
 # recognized heuristically (footer signature or plausible header) and may match
 # a variant the TGA decoder does not support; detection names the container, not
-# decodability, so it is tried last. returns FORMAT_UNKNOWN when nothing matches.
+# decodability, so it is tried last.
 # ---
 # src:     pointer to the leading bytes of the encoded image
 # src_len: number of bytes available at src
-# ret:     a FORMAT_* tag
-pub fun detect(src: *u8, src_len: usize) u8 {
-    if (src == nil) { ret FORMAT_UNKNOWN; }
+# ret:     the detected format, or none when nothing matches
+pub fun detect(src: *u8, src_len: usize) opt[Format] {
     if (src_len >= 4 && src[0] == 'q' && src[1] == 'o' && src[2] == 'i' && src[3] == 'f') {
-        ret FORMAT_QOI;
+        ret opt[Format].some{Format.qoi{}};
     }
     if (src_len >= 8) {
         var i: usize = 0;
@@ -83,29 +88,34 @@ pub fun detect(src: *u8, src_len: usize) u8 {
             if (src[i] != PNG_SIGNATURE[i]) { png_ok = 0; }
             i = i + 1;
         }
-        if (png_ok == 1) { ret FORMAT_PNG; }
+        if (png_ok == 1) { ret opt[Format].some{Format.png{}}; }
     }
-    if (looks_like_tga(src, src_len) == 1) { ret FORMAT_TGA; }
-    ret FORMAT_UNKNOWN;
+    if (src_len >= 3 && src[0] == 0xFF && src[1] == 0xD8 && src[2] == 0xFF) {
+        ret opt[Format].some{Format.jpeg{}};
+    }
+    if (looks_like_tga(src, src_len) == 1) { ret opt[Format].some{Format.tga{}}; }
+    ret opt[Format].none{};
+}
+
+# whether detect names the expected format
+fun detects(src: *u8, src_len: usize, want: Format) u8 {
+    val got: opt[Format] = detect(src, src_len);
+    if (!sel got.some) { ret 0; }
+    if (!same_case[Format](got.some, want)) { ret 0; }
+    ret 1;
 }
 
 test "format: known names" {
-    if (!str_equals(format_name(FORMAT_QOI), "qoi"))   { ret 1; }
-    if (!str_equals(format_name(FORMAT_TGA), "tga"))   { ret 1; }
-    if (!str_equals(format_name(FORMAT_PNG), "png"))   { ret 1; }
-    if (!str_equals(format_name(FORMAT_JPEG), "jpeg")) { ret 1; }
-    ret 0;
-}
-
-test "format: unknown falls through" {
-    if (!str_equals(format_name(FORMAT_UNKNOWN), "unknown")) { ret 1; }
-    if (!str_equals(format_name(200), "unknown"))           { ret 1; }
+    if (!str_equals(format_name(Format.qoi{}), "qoi"))   { ret 1; }
+    if (!str_equals(format_name(Format.tga{}), "tga"))   { ret 2; }
+    if (!str_equals(format_name(Format.png{}), "png"))   { ret 3; }
+    if (!str_equals(format_name(Format.jpeg{}), "jpeg")) { ret 4; }
     ret 0;
 }
 
 test "format: detect qoi magic" {
     var buf: [14]u8 = [14]u8{'q', 'o', 'i', 'f', 0, 0, 0, 1, 0, 0, 0, 1, 4, 0};
-    if (detect(?buf[0], 14) != FORMAT_QOI) { ret 1; }
+    if (detects(?buf[0], 14, Format.qoi{}) == 0) { ret 1; }
     ret 0;
 }
 
@@ -114,22 +124,28 @@ test "format: detect tga by header heuristic" {
     buf[1]  = 0;   # color_map_type: none
     buf[2]  = 2;   # image_type: uncompressed truecolor
     buf[16] = 32;  # pixel depth
-    if (detect(?buf[0], 18) != FORMAT_TGA) { ret 1; }
+    if (detects(?buf[0], 18, Format.tga{}) == 0) { ret 1; }
     ret 0;
 }
 
 test "format: detect png signature" {
     var buf: [8]u8 = [8]u8{137, 80, 78, 71, 13, 10, 26, 10};
-    if (detect(?buf[0], 8) != FORMAT_PNG) { ret 1; }
+    if (detects(?buf[0], 8, Format.png{}) == 0) { ret 1; }
     # a signature the transfer-corruption check is meant to catch is not a PNG
     buf[2] = 0;
-    if (detect(?buf[0], 8) == FORMAT_PNG) { ret 1; }
+    if (detects(?buf[0], 8, Format.png{}) != 0) { ret 2; }
     ret 0;
 }
 
-test "format: detect rejects garbage and nil" {
+test "format: detect jpeg start-of-image marker" {
+    var buf: [4]u8 = [4]u8{0xFF, 0xD8, 0xFF, 0xE0};
+    if (detects(?buf[0], 4, Format.jpeg{}) == 0) { ret 1; }
+    ret 0;
+}
+
+test "format: detect rejects garbage" {
     var buf: [4]u8 = [4]u8{0xDE, 0xAD, 0xBE, 0xEF};
-    if (detect(?buf[0], 4) != FORMAT_UNKNOWN) { ret 1; }
-    if (detect(nil, 100) != FORMAT_UNKNOWN)   { ret 1; }
+    val got: opt[Format] = detect(?buf[0], 4);
+    if (!sel got.none) { ret 1; }
     ret 0;
 }

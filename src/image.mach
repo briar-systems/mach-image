@@ -1,7 +1,7 @@
 # the flat public surface of mach-image
 #
 # a bare `use image;` reaches the whole API under one namespace, e.g.
-# image.VERSION, image.FORMAT_QOI, image.format_name(...).
+# image.VERSION, image.Format, image.format_name(...).
 
 use std.types.string.str;
 use image.format;
@@ -15,11 +15,7 @@ use std.runtime;
 # the mach-image release this source corresponds to
 pub val VERSION: str = "0.2.0";
 
-fwd format.FORMAT_UNKNOWN;
-fwd format.FORMAT_QOI;
-fwd format.FORMAT_TGA;
-fwd format.FORMAT_PNG;
-fwd format.FORMAT_JPEG;
+fwd format.Format;
 fwd format.format_name;
 fwd format.detect;
 
@@ -27,15 +23,10 @@ fwd codec.Image;
 fwd codec.COLORSPACE_SRGB;
 fwd codec.COLORSPACE_LINEAR;
 fwd codec.image_byte_len;
-fwd codec.DecodeStatus;
-fwd codec.DECODE_OK;
-fwd codec.DECODE_TRUNCATED;
-fwd codec.DECODE_BAD_MAGIC;
-fwd codec.DECODE_BAD_HEADER;
-fwd codec.DECODE_SHORT_BUFFER;
-fwd codec.DECODE_UNSUPPORTED;
-fwd codec.DECODE_CORRUPT;
-fwd codec.decode_status_name;
+fwd codec.DecodeError;
+fwd codec.decode_error_name;
+fwd codec.EncodeError;
+fwd codec.encode_error_name;
 
 fwd qoi.qoi_info;
 fwd qoi.qoi_decode;
