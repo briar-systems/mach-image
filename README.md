@@ -1,24 +1,25 @@
 # mach-image
 
 Pure-mach image decoding and encoding for the engine and its tooling. No C, no
-bindings, no system image libraries — just the codecs implemented directly in
+bindings, no system image libraries, just the codecs implemented directly in
 Mach. Project id is `image`, so consumers reach everything as `image.*`.
 
 ```mach
+use std.types.result.res;
+use std.types.size.usize;
 use image;
 
-fun example() {
-    val format: u8 = image.FORMAT_QOI;
-    val name: str = image.format_name(format);   # "qoi"
+fun width_of(src: *u8, len: usize) u32 {
+    val info: res[image.Image, image.DecodeError] = image.png_info(src, len);
+    if (sel info.err) { ret 0; }
+    ret info.ok.width;
 }
 ```
 
-Consuming projects vendor mach-image as a normal Mach dependency:
+Consuming projects add mach-image as a normal Mach dependency:
 
-```toml
-[deps.mach-image]
-git = "https://github.com/briar-systems/mach-image"
-ref = "branch/main"
+```sh
+mach dep add . image --git https://github.com/briar-systems/mach-image --ref branch/main
 ```
 
 ## Scope
@@ -34,22 +35,22 @@ images from the toolchain (screenshots, generated assets).
 | QOI | all chunk types | yes | spec-complete, round-trips |
 | TGA | truecolor types 2 and 10, 24- and 32-bit | 32-bit uncompressed | color-mapped and grayscale variants are rejected, not decoded |
 | PNG | every spec-defined bit depth across all five color types, filters 0-4, Adam7 interlace, tRNS | RGBA8, filter 0, stored DEFLATE | allocation-free deterministic output; 1/2/4-bit samples decode MSB-first; every chunk CRC is validated |
-| JPEG | — | — | not started |
+| JPEG | no | no | detected, not decoded |
 
 A decoder rejects a variant it does not implement rather than producing
-approximate pixels, so an unsupported configuration is always a typed
-`DecodeStatus` and never silent corruption.
+approximate pixels, so an unsupported configuration is always a
+`DecodeError` case and never silent corruption.
 
 ## Goals
 
 - Decoders, in priority order:
-  - **QOI** — first: trivial, dependency-free, and a clean end-to-end vertical
+  - **QOI**: first: trivial, dependency-free, and a clean end-to-end vertical
     slice for the codec surface.
-  - **TGA** — next: uncompressed and RLE variants, still no external
+  - **TGA**: next: uncompressed and RLE variants, still no external
     dependencies.
-  - **PNG** — third: every valid bit depth across every color type, backed by
+  - **PNG**: third: every valid bit depth across every color type, backed by
     mach-std's DEFLATE implementation and the PngSuite corpus.
-  - **JPEG** — later, once the lossless formats are solid.
+  - **JPEG**: later, once the lossless formats are solid.
 - Encoders for at least **QOI** and **PNG**, sized for tooling use
   (screenshots, generated assets) rather than exhaustive option coverage.
 - Zero-cost, allocation-explicit codecs: buffers are caller-supplied, following
@@ -59,7 +60,7 @@ approximate pixels, so an unsupported configuration is always a typed
 ## Non-goals
 
 - Exotic or legacy formats (BMP variants beyond need, GIF, TIFF, WebP, ...).
-- Color management — ICC profiles, gamut mapping, and CMS pipelines. Pixels are
+- Color management: ICC profiles, gamut mapping, and CMS pipelines. Pixels are
   handled in their stored color space; conversion is a consumer concern.
 
 ## Multiplatform
@@ -68,7 +69,7 @@ The codecs are pure algorithms over byte buffers. There is no OS dependency and
 no system library to link; the only platform concern is **endianness**, which
 the format readers and writers handle explicitly (image formats define their
 own byte order regardless of host). mach-image therefore builds for every
-target the Mach compiler supports — currently the `x86_64`, `aarch64`, and
+target the Mach compiler supports, currently the `x86_64`, `aarch64`, and
 `riscv64` instruction sets across the `linux`, `darwin`, `windows`, and
 `freestanding` operating-system targets (see `mach info`). The manifest
 declares the `x86_64` linux/windows/darwin triples used across the family;
@@ -79,8 +80,8 @@ other targets need only a corresponding `[target.*]` entry.
 ```
 src/
   image.mach    library surface: flat public namespace (VERSION, formats, codecs)
-  format.mach   format tags (FORMAT_*), format_name, and best-effort detect
-  codec.mach    the shared Image type, colorspace hints, size and status helpers
+  format.mach   the Format tag, format_name, and best-effort detect
+  codec.mach    the shared Image type, colorspace hints, sizing, and error tags
   qoi.mach      QOI decoder and encoder
   tga.mach      TGA truecolor decoder (types 2 and 10) and a minimal encoder
   png.mach      PNG decoder and deterministic allocation-free RGBA8 encoder
@@ -89,9 +90,10 @@ src/
 
 `codec.mach` defines the library's common currency: an `Image` is an RGBA8
 pixel buffer (row-major, top-left origin) with its dimensions and source
-metadata. Decoders never allocate — callers parse a header with `*_info`, size
-storage with `image_byte_len`, and pass the buffer in; a decode returns a
-`DecodeStatus` (`DECODE_OK` or a typed error). Untrusted input is bounds-checked
+metadata. Decoders never allocate: callers parse a header with `*_info`, size
+storage with `image_byte_len`, and pass the buffer in. A decode returns
+`res[Image, DecodeError]`, an encode `res[usize, EncodeError]`, and a short
+buffer is refused with the byte count it needed. Untrusted input is bounds-checked
 and rejected cleanly, never trusted.
 
 Each codec lands as its own module (`qoi.mach`, `tga.mach`, ...) exposing its

@@ -8,7 +8,7 @@ Usage: gen_pngsuite.py <corpus-dir> [-o src/pngsuite.mach]
 
 For every file, this script independently re-derives (from the PNG spec and,
 for the deliberately-corrupt "x*" files, their documented defect) the
-DecodeStatus png_info should report -- it does not run the mach decoder and
+DecodeError case png_info should report -- it does not run the mach decoder and
 copy its output. It never calls the mach toolchain.
 
 For files expected to decode successfully, the script also decodes the
@@ -47,7 +47,7 @@ ADAM7_Y_STEP = [8, 8, 8, 4, 4, 2, 2]
 
 
 def fnv1a64(data: bytes) -> int:
-    """FNV-1a 64-bit, matching dep/mach-std/src/crypto/hash/fnv1a.mach."""
+    """FNV-1a 64-bit, matching dep/std/src/crypto/hash/fnv1a.mach."""
     h = FNV_OFFSET
     for b in data:
         h = ((h ^ b) * FNV_PRIME) & FNV_MASK
@@ -97,7 +97,7 @@ class Verdict:
 
 
 def classify(data: bytes) -> Verdict:
-    """re-derive the DecodeStatus png_info should report, from the PNG spec.
+    """re-derive the DecodeError case png_info should report, from the PNG spec.
 
     mirrors the chunk-walk a spec-compliant reader performs: signature, then
     every chunk's CRC (a bad CRC anywhere -- not just in IHDR -- fails the
@@ -107,9 +107,9 @@ def classify(data: bytes) -> Verdict:
     spec-defined bit depth is accepted.
     """
     if len(data) < 8:
-        return Verdict("DECODE_TRUNCATED")
+        return Verdict("truncated")
     if data[:8] != PNG_SIGNATURE:
-        return Verdict("DECODE_BAD_MAGIC")
+        return Verdict("bad_magic")
 
     off = 8
     seen_ihdr = False
@@ -125,86 +125,86 @@ def classify(data: bytes) -> Verdict:
 
     while not seen_iend:
         if off + 12 > len(data):
-            return Verdict("DECODE_TRUNCATED")
+            return Verdict("truncated")
         dlen = struct.unpack(">I", data[off:off + 4])[0]
         if dlen > 0x7FFFFFFF:
-            return Verdict("DECODE_BAD_HEADER")
+            return Verdict("bad_header")
         if off + 12 + dlen > len(data):
-            return Verdict("DECODE_TRUNCATED")
+            return Verdict("truncated")
 
         ctype = data[off + 4:off + 8]
         payload = data[off + 8:off + 8 + dlen]
         want = struct.unpack(">I", data[off + 8 + dlen:off + 12 + dlen])[0]
         calc = zlib.crc32(data[off + 4:off + 8 + dlen]) & 0xFFFFFFFF
         if calc != want:
-            return Verdict("DECODE_CORRUPT")
+            return Verdict("corrupt")
         if not chunk_type_valid(ctype):
-            return Verdict("DECODE_BAD_HEADER")
+            return Verdict("bad_header")
 
         if ctype == b"IHDR":
             if seen_ihdr or off != 8 or dlen != 13:
-                return Verdict("DECODE_BAD_HEADER")
+                return Verdict("bad_header")
             w, h, depth, ct, comp, filt, inter = struct.unpack(">IIBBBBB", payload)
             if w == 0 or h == 0 or w > 0x7FFFFFFF or h > 0x7FFFFFFF:
-                return Verdict("DECODE_BAD_HEADER")
+                return Verdict("bad_header")
             channels = COLOR_CHANNELS.get(ct, 0)
             if channels == 0:
-                return Verdict("DECODE_BAD_HEADER")
+                return Verdict("bad_header")
             if not depth_allowed(ct, depth):
-                return Verdict("DECODE_BAD_HEADER")
+                return Verdict("bad_header")
             if comp != 0 or filt != 0 or inter not in (0, 1):
-                return Verdict("DECODE_BAD_HEADER")
+                return Verdict("bad_header")
             hdr = dict(width=w, height=h, depth=depth, color_type=ct, interlace=inter)
             seen_ihdr = True
         elif not seen_ihdr:
-            return Verdict("DECODE_BAD_HEADER")
+            return Verdict("bad_header")
         elif ctype == b"PLTE":
             if has_plte or has_trns or seen_idat or dlen == 0 or dlen % 3 != 0:
-                return Verdict("DECODE_BAD_HEADER")
+                return Verdict("bad_header")
             if hdr["color_type"] in (0, 4):
-                return Verdict("DECODE_BAD_HEADER")
+                return Verdict("bad_header")
             entries = dlen // 3
             if entries > 256:
-                return Verdict("DECODE_BAD_HEADER")
+                return Verdict("bad_header")
             if hdr["color_type"] == 3 and entries > (1 << hdr["depth"]):
-                return Verdict("DECODE_BAD_HEADER")
+                return Verdict("bad_header")
             has_plte, plte_entries, plte_bytes = True, entries, payload
             idat_done = seen_idat
         elif ctype == b"tRNS":
             if has_trns or seen_idat:
-                return Verdict("DECODE_BAD_HEADER")
+                return Verdict("bad_header")
             ct = hdr["color_type"]
             if ct == 0 and dlen != 2:
-                return Verdict("DECODE_BAD_HEADER")
+                return Verdict("bad_header")
             if ct == 2 and dlen != 6:
-                return Verdict("DECODE_BAD_HEADER")
+                return Verdict("bad_header")
             if ct == 3 and (not has_plte or dlen > plte_entries):
-                return Verdict("DECODE_BAD_HEADER")
+                return Verdict("bad_header")
             if ct not in (0, 2, 3):
-                return Verdict("DECODE_BAD_HEADER")
+                return Verdict("bad_header")
             has_trns, trns_bytes = True, payload
             idat_done = seen_idat
         elif ctype == b"IDAT":
             if idat_done:
-                return Verdict("DECODE_BAD_HEADER")
+                return Verdict("bad_header")
             seen_idat = True
         elif ctype == b"IEND":
             if dlen != 0 or not seen_idat:
-                return Verdict("DECODE_BAD_HEADER")
+                return Verdict("bad_header")
             seen_iend = True
         else:
             if not (ctype[0] & 0x20):
-                return Verdict("DECODE_UNSUPPORTED")
+                return Verdict("unsupported")
             idat_done = seen_idat
 
         off += 12 + dlen
 
     if hdr["color_type"] == 3 and not has_plte:
-        return Verdict("DECODE_BAD_HEADER")
+        return Verdict("bad_header")
 
     channels = 4 if (hdr["color_type"] in (4, 6) or has_trns) else 3
     return Verdict(
-        "DECODE_OK", hdr["width"], hdr["height"], channels,
+        "ok", hdr["width"], hdr["height"], channels,
         hdr=hdr, plte=plte_bytes, trns=trns_bytes if has_trns else None,
     )
 
@@ -499,7 +499,7 @@ def build(corpus_dir: str) -> str:
     decodable = []   # (name, data, verdict, hash)
     corrupt_rasters = []   # (name, data), valid framing but corrupt image data
     for filename, stem, name, data, verdict in entries:
-        if verdict.status != "DECODE_OK":
+        if verdict.status != "ok":
             continue
         path = os.path.join(corpus_dir, filename)
         try:
@@ -531,21 +531,25 @@ def build(corpus_dir: str) -> str:
         out.append('test "%s" {' % title)
         for i, (filename, stem, name, data, verdict) in enumerate(cases, start=1):
             w, h, ch = verdict.width, verdict.height, verdict.channels
-            out.append(
-                "    if (expect_info(?%s[0], %d, %s, %d, %d, %d) == 0) { ret %d; }"
-                % (name, len(data), verdict.status, w, h, ch, i)
-            )
+            if verdict.status == "ok":
+                out.append(
+                    "    if (expect_info(?%s[0], %d, %d, %d, %d) == 0) { ret %d; }"
+                    % (name, len(data), w, h, ch, i)
+                )
+            else:
+                out.append(
+                    "    if (expect_refusal(?%s[0], %d, DecodeError.%s{}) == 0) { ret %d; }"
+                    % (name, len(data), verdict.status, i)
+                )
         out.append("    ret 0;")
         out.append("}")
 
     if corrupt_rasters:
         out.append("")
         out.append('test "pngsuite: corrupt image data is rejected" {')
-        out.append("    var img: Image;")
         for i, (name, data) in enumerate(corrupt_rasters, start=1):
             out.append(
-                "    if (png_decode(?%s[0], %d, ?suite_pix[0], 262144, "
-                "?suite_scratch[0], 262144, ?img) != DECODE_CORRUPT) { ret %d; }"
+                "    if (expect_corrupt(?%s[0], %d) == 0) { ret %d; }"
                 % (name, len(data), i)
             )
         out.append("    ret 0;")
@@ -599,18 +603,18 @@ HEADER = '''
 #
 # expectations are derived from the PNG spec and each file's documented
 # defect, never by running the decoder and recording its output: a
-# well-formed file at any spec-defined bit depth is DECODE_OK, with channels 4
+# well-formed file at any spec-defined bit depth decodes, with channels 4
 # when the color type is 4 or 6 or a tRNS chunk is present, else 3. the
 # deliberately-corrupt "x*" files are rejected
-# per their documented defect: a bad signature byte is DECODE_BAD_MAGIC, a bad
-# chunk CRC is DECODE_CORRUPT, and an undefined color type or bit depth, or a
-# missing IDAT chunk, is DECODE_BAD_HEADER. xcsn0g01's bad IDAT chunk CRC is
-# DECODE_CORRUPT and xdtn0g01's missing IDAT is DECODE_BAD_HEADER; both now
+# per their documented defect: a bad signature byte is bad_magic, a bad
+# chunk CRC is corrupt, and an undefined color type or bit depth, or a
+# missing IDAT chunk, is bad_header. xcsn0g01's bad IDAT chunk CRC is
+# corrupt and xdtn0g01's missing IDAT is bad_header; both now
 # reach their documented defect instead of stopping at the old depth gate.
 #
 # pngsuite_hashes is an FNV-1a 64 table (offset basis 14695981039346656037,
 # prime 1099511628211, folded one byte at a time -- see
-# dep/mach-std/src/crypto/hash/fnv1a.mach) over the expected RGBA8 output of
+# dep/std/src/crypto/hash/fnv1a.mach) over the expected RGBA8 output of
 # every file this decoder is expected to decode successfully. the expected
 # pixels are computed independently of this decoder, with Pillow as a
 # cross-check oracle; 16-bit samples are reduced to 8 bits by keeping the high
@@ -622,14 +626,12 @@ HEADER = '''
 '''
 
 IMPORTS = '''
+use std.types.option.opt;
+use std.types.result.res;
 use std.types.size.usize;
 use image.codec.Image;
-use image.codec.DecodeStatus;
-use image.codec.DECODE_OK;
-use image.codec.DECODE_BAD_MAGIC;
-use image.codec.DECODE_BAD_HEADER;
-use image.codec.DECODE_UNSUPPORTED;
-use image.codec.DECODE_CORRUPT;
+use image.codec.DecodeError;
+use image.codec.same_case;
 use image.png.png_info;
 use image.png.png_decode;
 use image.png.png_scratch_len;
@@ -638,13 +640,27 @@ use fnv: std.crypto.hash.fnv1a;
 '''
 
 EXPECT_INFO = '''
-# 1 when png_info reports want, and on success the expected geometry too
-fun expect_info(data: *u8, len: usize, want: DecodeStatus, w: u32, h: u32, ch: u8) u8 {
-    var img: Image;
-    val st: DecodeStatus = png_info(data, len, ?img);
-    if (st != want) { ret 0; }
-    if (want != DECODE_OK) { ret 1; }
-    if (img.width != w || img.height != h || img.channels != ch) { ret 0; }
+# 1 when png_info accepts the file with the expected geometry
+fun expect_info(data: *u8, len: usize, w: u32, h: u32, ch: u8) u8 {
+    val r: res[Image, DecodeError] = png_info(data, len);
+    if (!sel r.ok) { ret 0; }
+    if (r.ok.width != w || r.ok.height != h || r.ok.channels != ch) { ret 0; }
+    ret 1;
+}
+
+# 1 when png_info refuses the file with the case want names
+fun expect_refusal(data: *u8, len: usize, want: DecodeError) u8 {
+    val r: res[Image, DecodeError] = png_info(data, len);
+    if (!sel r.err) { ret 0; }
+    if (!same_case[DecodeError](r.err, want)) { ret 0; }
+    ret 1;
+}
+
+# 1 when png_decode refuses the file as corrupt
+fun expect_corrupt(data: *u8, len: usize) u8 {
+    val r: res[Image, DecodeError] = png_decode(data, len, ?suite_pix[0], 262144, ?suite_scratch[0], 262144);
+    if (!sel r.err) { ret 0; }
+    if (!sel r.err.corrupt) { ret 0; }
     ret 1;
 }
 '''
@@ -664,19 +680,19 @@ test "pngsuite: every supported image decodes to its expected pixels" {
         val data: *u8 = pngsuite_decodable(i, ?len, ?w, ?h);
         if (data == nil) { ret (i + 1)::i32; }
 
-        val scratch_need: usize = png_scratch_len(data, len);
-        if (scratch_need == 0 || scratch_need > 262144) { ret (i + 1)::i32; }
+        val scratch_need: res[usize, DecodeError] = png_scratch_len(data, len);
+        if (!sel scratch_need.ok)       { ret (i + 1)::i32; }
+        if (scratch_need.ok > 262144)   { ret (i + 1)::i32; }
 
-        var img: Image;
-        if (png_decode(data, len, ?suite_pix[0], 262144, ?suite_scratch[0], 262144, ?img) != DECODE_OK) {
-            ret (i + 1)::i32;
-        }
-        if (img.width != w || img.height != h) { ret (i + 1)::i32; }
+        val r: res[Image, DecodeError] = png_decode(data, len, ?suite_pix[0], 262144, ?suite_scratch[0], 262144);
+        if (!sel r.ok) { ret (i + 1)::i32; }
+        if (r.ok.width != w || r.ok.height != h) { ret (i + 1)::i32; }
 
         var hash: u64 = fnv.FNV_INIT;
         var b:    usize = 0;
-        val need: usize = image_byte_len(w, h);
-        for (b < need) {
+        val need: opt[usize] = image_byte_len(w, h);
+        if (!sel need.some) { ret (i + 1)::i32; }
+        for (b < need.some) {
             hash = fnv.step_u8(hash, suite_pix[b]);
             b = b + 1;
         }
