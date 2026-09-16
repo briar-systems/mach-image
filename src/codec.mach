@@ -50,7 +50,7 @@ pub fun image_byte_len(width: u32, height: u32) opt[usize] {
     val h: usize = height::usize;
     if (w == 0 || h == 0) { ret opt[usize].none{}; }
     val pixels: usize = w * h;
-    if (pixels / w != h) { ret opt[usize].none{}; }
+    if (pixels / w != h)          { ret opt[usize].none{}; }
     if (pixels > ~(0::usize) / 4) { ret opt[usize].none{}; }
     ret opt[usize].some{pixels * 4};
 }
@@ -132,13 +132,13 @@ pub fun same_case[T](a: T, b: T) bool {
 
 test "codec: image_byte_len basic" {
     val a: opt[usize] = image_byte_len(1, 1);
-    if (!sel a.some)      { ret 1; }
+    if (!sel a.some) { ret 1; }
     if (a.some != 4) { ret 1; }
     val b: opt[usize] = image_byte_len(2, 3);
-    if (!sel b.some)      { ret 2; }
+    if (!sel b.some)  { ret 2; }
     if (b.some != 24) { ret 2; }
     val c: opt[usize] = image_byte_len(16, 16);
-    if (!sel c.some)      { ret 3; }
+    if (!sel c.some)    { ret 3; }
     if (c.some != 1024) { ret 3; }
     ret 0;
 }

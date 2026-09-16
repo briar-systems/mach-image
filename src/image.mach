@@ -3,12 +3,12 @@
 # a bare `use image;` reaches the whole API under one namespace, e.g.
 # image.VERSION, image.Format, image.format_name(...).
 
-use std.types.string.str;
-use image.format;
 use image.codec;
+use image.format;
+use image.png;
 use image.qoi;
 use image.tga;
-use image.png;
+use std.types.string.str;
 # links the startup entrypoint so `mach test` over this library produces a binary.
 use std.runtime;
 

@@ -1,12 +1,12 @@
 # identifiers for the image formats mach-image handles, and
 # best-effort detection from a byte prefix
 
+use image.codec.same_case;
+use image.png.PNG_SIGNATURE;
 use std.types.option.opt;
 use std.types.size.usize;
 use std.types.string.str;
 use std.types.string.str_equals;
-use image.codec.same_case;
-use image.png.PNG_SIGNATURE;
 
 # an image container format
 # ---
@@ -45,8 +45,8 @@ val tga_footer_signature: [18]u8 = [18]u8{
 # range-checked against the known image and color-map types.
 fun looks_like_tga(src: *u8, src_len: usize) u8 {
     if (src_len >= 26) {
-        var i: usize = 0;
-        var footer_ok: u8 = 1;
+        var i:         usize = 0;
+        var footer_ok: u8    = 1;
         for (i < 18) {
             if (src[src_len - 18 + i] != tga_footer_signature[i]) { footer_ok = 0; }
             i = i + 1;
@@ -82,8 +82,8 @@ pub fun detect(src: *u8, src_len: usize) opt[Format] {
         ret opt[Format].some{Format.qoi{}};
     }
     if (src_len >= 8) {
-        var i: usize = 0;
-        var png_ok: u8 = 1;
+        var i:      usize = 0;
+        var png_ok: u8    = 1;
         for (i < 8) {
             if (src[i] != PNG_SIGNATURE[i]) { png_ok = 0; }
             i = i + 1;
@@ -100,7 +100,7 @@ pub fun detect(src: *u8, src_len: usize) opt[Format] {
 # whether detect names the expected format
 fun detects(src: *u8, src_len: usize, want: Format) u8 {
     val got: opt[Format] = detect(src, src_len);
-    if (!sel got.some) { ret 0; }
+    if (!sel got.some)                      { ret 0; }
     if (!same_case[Format](got.some, want)) { ret 0; }
     ret 1;
 }
@@ -121,9 +121,9 @@ test "format: detect qoi magic" {
 
 test "format: detect tga by header heuristic" {
     var buf: [18]u8;
-    buf[1]  = 0;   # color_map_type: none
-    buf[2]  = 2;   # image_type: uncompressed truecolor
-    buf[16] = 32;  # pixel depth
+    buf[1]  = 0; # color_map_type: none
+    buf[2]  = 2; # image_type: uncompressed truecolor
+    buf[16] = 32; # pixel depth
     if (detects(?buf[0], 18, Format.tga{}) == 0) { ret 1; }
     ret 0;
 }
@@ -144,7 +144,7 @@ test "format: detect jpeg start-of-image marker" {
 }
 
 test "format: detect rejects garbage" {
-    var buf: [4]u8 = [4]u8{0xDE, 0xAD, 0xBE, 0xEF};
+    var buf: [4]u8       = [4]u8{0xDE, 0xAD, 0xBE, 0xEF};
     val got: opt[Format] = detect(?buf[0], 4);
     if (!sel got.none) { ret 1; }
     ret 0;

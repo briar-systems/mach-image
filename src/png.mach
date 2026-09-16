@@ -14,33 +14,33 @@
 # emits one deterministic subset: noninterlaced RGBA8 scanlines with filter 0 in
 # a zlib stream made of stored DEFLATE blocks, without allocating.
 
+use image.codec.COLORSPACE_LINEAR;
+use image.codec.COLORSPACE_SRGB;
+use image.codec.DecodeError;
+use image.codec.EncodeError;
+use image.codec.Image;
+use image.codec.image_byte_len;
+use image.codec.same_case;
+use A:     std.allocator;
+use FIX:   std.allocator.fixed;
+use Z:     std.compress.inflate;
+use ZL:    std.compress.zlib;
+use adler: std.crypto.hash.adler32;
+use crc:   std.crypto.hash.crc32;
+use std.memory.raw_copy;
+use std.memory.raw_equal;
 use std.types.bool.bool;
 use std.types.error.err;
 use std.types.option.opt;
 use std.types.result.res;
 use std.types.size.usize;
-use std.memory.raw_copy;
-use std.memory.raw_equal;
-use A:   std.allocator;
-use FIX: std.allocator.fixed;
-use Z:   std.compress.inflate;
-use ZL:  std.compress.zlib;
-use crc: std.crypto.hash.crc32;
-use adler: std.crypto.hash.adler32;
-use image.codec.Image;
-use image.codec.image_byte_len;
-use image.codec.same_case;
-use image.codec.COLORSPACE_SRGB;
-use image.codec.COLORSPACE_LINEAR;
-use image.codec.DecodeError;
-use image.codec.EncodeError;
 
 val PNG_SIG_LEN:    usize = 8;
 val PNG_IHDR_LEN:   usize = 13;
-val PNG_CHUNK_OVER: usize = 12;   # length + type + crc around every payload
+val PNG_CHUNK_OVER: usize = 12; # length + type + crc around every payload
 val PNG_STORED_MAX: usize = 65535;
-val PNG_ZLIB_OVER:  usize = 6;    # two-byte header plus four-byte Adler-32
-val PNG_FILE_FIXED: usize = 57;   # signature, chunk framing, IHDR, and IEND
+val PNG_ZLIB_OVER:  usize = 6; # two-byte header plus four-byte Adler-32
+val PNG_FILE_FIXED: usize = 57; # signature, chunk framing, IHDR, and IEND
 val PNG_CHUNK_MAX:  usize = 0x7FFFFFFF;
 
 # the fixed 8-byte PNG signature
@@ -120,13 +120,13 @@ fun chunk_type_byte(b: u8) u8 {
 # the IHDR fields the decoder needs, plus the sizes derived from them
 # ---
 # width, height: image dimensions in pixels
-# depth:         bits per sample (1, 2, 4, 8, or 16 as allowed by color type)
-# color_type:    PNG_COLOR_*
-# interlace:     0 none, 1 Adam7
-# channels:      samples per source pixel, derived from color_type
-# pixels_len:    bytes of the RGBA8 output
-# raw_len:       bytes of the decompressed, filtered raster
-# scratch_len:   bytes of scratch png_decode needs
+# depth:       bits per sample (1, 2, 4, 8, or 16 as allowed by color type)
+# color_type:  PNG_COLOR_*
+# interlace:   0 none, 1 Adam7
+# channels:    samples per source pixel, derived from color_type
+# pixels_len:  bytes of the RGBA8 output
+# raw_len:     bytes of the decompressed, filtered raster
+# scratch_len: bytes of scratch png_decode needs
 rec PngHeader {
     width:       u32;
     height:      u32;
@@ -143,7 +143,7 @@ rec PngHeader {
 # ---
 # plte_off/plte_entries: palette offset and entry count
 # trns_off/trns_len:     transparency offset and payload length in bytes
-# idat_total:            summed IDAT payload bytes, the zlib stream's length
+# idat_total: summed IDAT payload bytes, the zlib stream's length
 rec PngScan {
     plte_off:     usize;
     plte_entries: usize;
@@ -261,14 +261,14 @@ fun scan_chunks(src: *u8, src_len: usize, hdr: *PngHeader, out: *PngScan) err[De
     out.has_trns     = 0;
 
     var off:       usize = PNG_SIG_LEN;
-    var seen_ihdr: u8 = 0;
-    var seen_idat: u8 = 0;
-    var idat_done: u8 = 0;
-    var seen_iend: u8 = 0;
+    var seen_ihdr: u8    = 0;
+    var seen_idat: u8    = 0;
+    var idat_done: u8    = 0;
+    var seen_iend: u8    = 0;
 
     for (seen_iend == 0) {
-        if (off > src_len)                         { ret err[DecodeError].err{DecodeError.truncated{}}; }
-        if (src_len - off < PNG_CHUNK_OVER)        { ret err[DecodeError].err{DecodeError.truncated{}}; }
+        if (off > src_len)                  { ret err[DecodeError].err{DecodeError.truncated{}}; }
+        if (src_len - off < PNG_CHUNK_OVER) { ret err[DecodeError].err{DecodeError.truncated{}}; }
         val raw_len: u32 = read_be32(src, off);
         if (raw_len > 0x7FFFFFFF) { ret err[DecodeError].err{DecodeError.bad_header{}}; }
 
@@ -472,7 +472,7 @@ fun unfilter_row(filter: u8, cur: *u8, prev: *u8, len: usize, bpp: usize) err[De
         i = bpp;
         for (i < len) {
             cur[i] = cur[i] + cur[i - bpp];
-            i = i + 1;
+            i      = i + 1;
         }
         ret err[DecodeError].ok{};
     }
@@ -480,7 +480,7 @@ fun unfilter_row(filter: u8, cur: *u8, prev: *u8, len: usize, bpp: usize) err[De
         if (prev == nil) { ret err[DecodeError].ok{}; }
         for (i < len) {
             cur[i] = cur[i] + prev[i];
-            i = i + 1;
+            i      = i + 1;
         }
         ret err[DecodeError].ok{};
     }
@@ -491,7 +491,7 @@ fun unfilter_row(filter: u8, cur: *u8, prev: *u8, len: usize, bpp: usize) err[De
             if (i >= bpp)    { a = cur[i - bpp]::u16; }
             if (prev != nil) { b = prev[i]::u16; }
             cur[i] = cur[i] + ((a + b) / 2)::u8;
-            i = i + 1;
+            i      = i + 1;
         }
         ret err[DecodeError].ok{};
     }
@@ -500,13 +500,13 @@ fun unfilter_row(filter: u8, cur: *u8, prev: *u8, len: usize, bpp: usize) err[De
             var a: u8 = 0;
             var b: u8 = 0;
             var c: u8 = 0;
-            if (i >= bpp)    { a = cur[i - bpp]; }
+            if (i >= bpp) { a = cur[i - bpp]; }
             if (prev != nil) {
                 b = prev[i];
                 if (i >= bpp) { c = prev[i - bpp]; }
             }
             cur[i] = cur[i] + paeth(a, b, c);
-            i = i + 1;
+            i      = i + 1;
         }
         ret err[DecodeError].ok{};
     }
@@ -564,7 +564,7 @@ fun emit_pixel(ctx: *PngCtx, src: *u8, bit_off: usize, dst: *u8) err[DecodeError
 
     if (ctx.color_type == PNG_COLOR_GRAY) {
         val full: u16 = source_sample(src, bit_off, 0, depth);
-        val g: u8 = sample_8(full, depth);
+        val g:    u8  = sample_8(full, depth);
         dst[0] = g;
         dst[1] = g;
         dst[2] = g;
@@ -629,11 +629,11 @@ fun emit_pixel(ctx: *PngCtx, src: *u8, bit_off: usize, dst: *u8) err[DecodeError
 # non-interlaced image is the single-pass case of the same walk, which is why
 # there is no separate path for it. dst must already be image_byte_len bytes.
 fun decode_raster(hdr: *PngHeader, ctx: *PngCtx, raw: *u8, raw_len: usize, dst: *u8) err[DecodeError] {
-    val width:    usize = hdr.width::usize;
-    val height:   usize = hdr.height::usize;
-    val channels: usize = hdr.channels::usize;
-    val depth:    usize = hdr.depth::usize;
-    val bpp:      usize = filter_bpp(channels, depth);
+    val width:      usize = hdr.width::usize;
+    val height:     usize = hdr.height::usize;
+    val channels:   usize = hdr.channels::usize;
+    val depth:      usize = hdr.depth::usize;
+    val bpp:        usize = filter_bpp(channels, depth);
     val pixel_bits: usize = channels * depth;
 
     var pass_count: usize = 1;
@@ -662,8 +662,8 @@ fun decode_raster(hdr: *PngHeader, ctx: *PngCtx, raw: *u8, raw_len: usize, dst: 
             val filtered: opt[usize] = filtered_row_len(pw, channels, depth);
             if (!sel filtered.some) { ret err[DecodeError].err{DecodeError.corrupt{}}; }
             val row_bytes: usize = filtered.some - 1;
-            var prev: *u8 = nil;
-            var row:  usize = 0;
+            var prev:      *u8   = nil;
+            var row:       usize = 0;
             for (row < ph) {
                 if (off >= raw_len || row_bytes > raw_len - off - 1) { ret err[DecodeError].err{DecodeError.truncated{}}; }
                 val filter: u8  = raw[off];
@@ -672,10 +672,10 @@ fun decode_raster(hdr: *PngHeader, ctx: *PngCtx, raw: *u8, raw_len: usize, dst: 
                 val fs: err[DecodeError] = unfilter_row(filter, cur, prev, row_bytes, bpp);
                 if (sel fs.err) { ret fs; }
 
-                val y: usize = y_start + row * y_step;
+                val y:   usize = y_start + row * y_step;
                 var col: usize = 0;
                 for (col < pw) {
-                    val x: usize = x_start + col * x_step;
+                    val x:  usize            = x_start + col * x_step;
                     val es: err[DecodeError] = emit_pixel(
                         ctx, cur, col * pixel_bits, ?dst[(y * width + x) * 4]);
                     if (sel es.err) { ret es; }
@@ -702,7 +702,7 @@ fun header_image(hdr: *PngHeader, scan: *PngScan, pixels: *u8) Image {
         channels = 4;
     }
     ret Image{
-        pixels: pixels, width: hdr.width, height: hdr.height,
+        pixels:   pixels, width: hdr.width, height: hdr.height,
         channels: channels, colorspace: COLORSPACE_SRGB
     };
 }
@@ -720,7 +720,7 @@ fun header_image(hdr: *PngHeader, scan: *PngScan, pixels: *u8) Image {
 pub fun png_info(src: *u8, src_len: usize) res[Image, DecodeError] {
     var hdr:  PngHeader;
     var scan: PngScan;
-    val st: err[DecodeError] = scan_chunks(src, src_len, ?hdr, ?scan);
+    val st:   err[DecodeError] = scan_chunks(src, src_len, ?hdr, ?scan);
     if (sel st.err) { ret res[Image, DecodeError].err{st.err}; }
     ret res[Image, DecodeError].ok{header_image(?hdr, ?scan, nil)};
 }
@@ -738,7 +738,7 @@ pub fun png_info(src: *u8, src_len: usize) res[Image, DecodeError] {
 pub fun png_scratch_len(src: *u8, src_len: usize) res[usize, DecodeError] {
     var hdr:  PngHeader;
     var scan: PngScan;
-    val st: err[DecodeError] = scan_chunks(src, src_len, ?hdr, ?scan);
+    val st:   err[DecodeError] = scan_chunks(src, src_len, ?hdr, ?scan);
     if (sel st.err) { ret res[usize, DecodeError].err{st.err}; }
     ret res[usize, DecodeError].ok{hdr.scratch_len};
 }
@@ -755,15 +755,15 @@ pub fun png_scratch_len(src: *u8, src_len: usize) res[usize, DecodeError] {
 fun inflate_idat(src: *u8, src_len: usize, z: *ZL.Decompressor, dst: *u8, dst_len: usize, raw_len: usize) err[DecodeError] {
     var produced:  usize = 0;
     var off:       usize = PNG_SIG_LEN;
-    var seen_iend: u8 = 0;
+    var seen_iend: u8    = 0;
 
     for (seen_iend == 0) {
         # scan_chunks already walked this framing, but the bounds are rechecked
         # rather than assumed: nothing here should trust the source buffer.
-        if (off > src_len)                         { ret err[DecodeError].err{DecodeError.truncated{}}; }
-        if (src_len - off < PNG_CHUNK_OVER)        { ret err[DecodeError].err{DecodeError.truncated{}}; }
+        if (off > src_len)                  { ret err[DecodeError].err{DecodeError.truncated{}}; }
+        if (src_len - off < PNG_CHUNK_OVER) { ret err[DecodeError].err{DecodeError.truncated{}}; }
         val chunk_len: u32 = read_be32(src, off);
-        if (chunk_len > 0x7FFFFFFF)                { ret err[DecodeError].err{DecodeError.bad_header{}}; }
+        if (chunk_len > 0x7FFFFFFF) { ret err[DecodeError].err{DecodeError.bad_header{}}; }
         val dlen: usize = chunk_len::usize;
         if (dlen > src_len - off - PNG_CHUNK_OVER) { ret err[DecodeError].err{DecodeError.truncated{}}; }
 
@@ -786,7 +786,7 @@ fun inflate_idat(src: *u8, src_len: usize, z: *ZL.Decompressor, dst: *u8, dst_le
                 # decompresses to more than the header's dimensions allow.
                 if (p.status == ZL.OUTPUT_FULL) { ret err[DecodeError].err{DecodeError.corrupt{}}; }
                 # bytes trailing a finished stream are not ours to interpret.
-                if (p.status == ZL.DONE)        { brk; }
+                if (p.status == ZL.DONE) { brk; }
                 # a call that neither consumed nor produced cannot be repeated
                 # to any effect; stop and let the checks below classify it.
                 if (p.consumed == 0 && p.written == 0) { brk; }
@@ -799,7 +799,7 @@ fun inflate_idat(src: *u8, src_len: usize, z: *ZL.Decompressor, dst: *u8, dst_le
     # finish reports a stream that never reached its trailer, which is how a
     # payload cut short mid-deflate surfaces.
     val fin: err[ZL.InflateError] = ZL.finish(z);
-    if (sel fin.err) { ret err[DecodeError].err{DecodeError.truncated{}}; }
+    if (sel fin.err)         { ret err[DecodeError].err{DecodeError.truncated{}}; }
     if (produced != raw_len) { ret err[DecodeError].err{DecodeError.corrupt{}}; }
     ret err[DecodeError].ok{};
 }
@@ -820,10 +820,10 @@ fun inflate_idat(src: *u8, src_len: usize, z: *ZL.Decompressor, dst: *u8, dst_le
 # scratch_len: size of scratch in bytes
 # ret:         the image describing dst, or why the decode was refused
 pub fun png_decode(src: *u8, src_len: usize, dst: *u8, dst_len: usize,
-                   scratch: *u8, scratch_len: usize) res[Image, DecodeError] {
+    scratch: *u8, scratch_len: usize) res[Image, DecodeError] {
     var hdr:  PngHeader;
     var scan: PngScan;
-    val st: err[DecodeError] = scan_chunks(src, src_len, ?hdr, ?scan);
+    val st:   err[DecodeError] = scan_chunks(src, src_len, ?hdr, ?scan);
     if (sel st.err) { ret res[Image, DecodeError].err{st.err}; }
 
     if (dst_len < hdr.pixels_len) {
@@ -837,7 +837,7 @@ pub fun png_decode(src: *u8, src_len: usize, dst: *u8, dst_len: usize,
     # scratch; the raster follows it.
     var alloc: A.Allocator;
     var fixed: FIX.FixedState;
-    val mk: err[A.Error] = FIX.make(?alloc, ?fixed, scratch, PNG_WINDOW_SCRATCH);
+    val mk:    err[A.Error] = FIX.make(?alloc, ?fixed, scratch, PNG_WINDOW_SCRATCH);
     if (sel mk.err) {
         ret res[Image, DecodeError].err{DecodeError.short_scratch{hdr.scratch_len}};
     }
@@ -848,7 +848,7 @@ pub fun png_decode(src: *u8, src_len: usize, dst: *u8, dst_len: usize,
     }
     var z: ZL.Decompressor = zres.ok;
 
-    val raw: *u8 = ?scratch[PNG_WINDOW_SCRATCH];
+    val raw: *u8              = ?scratch[PNG_WINDOW_SCRATCH];
     val ist: err[DecodeError] = inflate_idat(src, src_len, ?z, raw, hdr.raw_len + 1, hdr.raw_len);
     # the window lives in the caller's scratch, so a refused release strands nothing
     ZL.dnit(?z);
@@ -891,7 +891,7 @@ fun stored_deflate_len(raw_len: usize) opt[usize] {
 
 # begin a PNG chunk and return its payload offset
 fun write_chunk_header(dst: *u8, off: usize, payload_len: usize,
-                       a: u8, b: u8, c: u8, d: u8) usize {
+    a: u8, b: u8, c: u8, d: u8) usize {
     write_be32(dst, off, payload_len::u32);
     dst[off + 4] = a;
     dst[off + 5] = b;
@@ -903,7 +903,7 @@ fun write_chunk_header(dst: *u8, off: usize, payload_len: usize,
 # append a chunk's CRC and return the offset following it
 fun finish_chunk(dst: *u8, off: usize, payload_len: usize) usize {
     val crc_off: usize = off + 8 + payload_len;
-    val sum: u32 = crc.hash(?dst[off + 4], payload_len + 4);
+    val sum:     u32   = crc.hash(?dst[off + 4], payload_len + 4);
     write_be32(dst, crc_off, sum);
     ret crc_off + 4;
 }
@@ -946,7 +946,7 @@ pub fun png_encode_bound(width: u32, height: u32) res[usize, EncodeError] {
     if (!sel deflate_len.some) { ret res[usize, EncodeError].err{EncodeError.too_large{}}; }
 
     val idat_len: opt[usize] = add_checked(deflate_len.some, PNG_ZLIB_OVER);
-    if (!sel idat_len.some) { ret res[usize, EncodeError].err{EncodeError.too_large{}}; }
+    if (!sel idat_len.some)            { ret res[usize, EncodeError].err{EncodeError.too_large{}}; }
     if (idat_len.some > PNG_CHUNK_MAX) { ret res[usize, EncodeError].err{EncodeError.too_large{}}; }
 
     val total: opt[usize] = add_checked(PNG_FILE_FIXED, idat_len.some);
@@ -970,17 +970,17 @@ pub fun png_encode(img: *Image, dst: *u8, dst_len: usize) res[usize, EncodeError
     if (img.channels != 3 && img.channels != 4) { ret res[usize, EncodeError].err{EncodeError.channels{}}; }
 
     val bound: res[usize, EncodeError] = png_encode_bound(img.width, img.height);
-    if (sel bound.err) { ret res[usize, EncodeError].err{bound.err}; }
+    if (sel bound.err)      { ret res[usize, EncodeError].err{bound.err}; }
     if (dst_len < bound.ok) { ret res[usize, EncodeError].err{EncodeError.short_buffer{bound.ok}}; }
 
     var i: usize = 0;
     for (i < PNG_SIG_LEN) {
         dst[i] = PNG_SIGNATURE[i];
-        i = i + 1;
+        i      = i + 1;
     }
 
     val ihdr_off: usize = PNG_SIG_LEN;
-    val ihdr: usize = write_chunk_header(dst, ihdr_off, PNG_IHDR_LEN, 'I', 'H', 'D', 'R');
+    val ihdr:     usize = write_chunk_header(dst, ihdr_off, PNG_IHDR_LEN, 'I', 'H', 'D', 'R');
     write_be32(dst, ihdr, img.width);
     write_be32(dst, ihdr + 4, img.height);
     dst[ihdr + 8]  = 8;
@@ -991,21 +991,21 @@ pub fun png_encode(img: *Image, dst: *u8, dst_len: usize) res[usize, EncodeError
 
     val idat_off: usize = finish_chunk(dst, ihdr_off, PNG_IHDR_LEN);
     # the bound succeeded, so none of these sizes overflow
-    val raw_len: usize = img.width::usize * 4 * img.height::usize + img.height::usize;
+    val raw_len:  usize = img.width::usize * 4 * img.height::usize + img.height::usize;
     val idat_len: usize = bound.ok - PNG_FILE_FIXED;
-    var p: usize = write_chunk_header(dst, idat_off, idat_len, 'I', 'D', 'A', 'T');
+    var p:        usize = write_chunk_header(dst, idat_off, idat_len, 'I', 'D', 'A', 'T');
 
     # 0x78 0x01 selects DEFLATE with a 32 KiB window, no preset dictionary,
     # fastest/no compression, and a valid RFC 1950 FCHECK.
     dst[p]     = 0x78;
     dst[p + 1] = 0x01;
-    p = p + 2;
+    p          = p + 2;
 
-    val row_len: usize = img.width::usize * 4 + 1;
-    var row_pos: usize = 0;
+    val row_len:   usize = img.width::usize * 4 + 1;
+    var row_pos:   usize = 0;
     var pixel_pos: usize = 0;
     var remaining: usize = raw_len;
-    var checksum: u32 = adler.init();
+    var checksum:  u32   = adler.init();
 
     for (remaining > 0) {
         val block_len: usize = write_stored_header(dst, p, remaining);
@@ -1018,17 +1018,17 @@ pub fun png_encode(img: *Image, dst: *u8, dst_len: usize) res[usize, EncodeError
                 dst[p] = 0;
             }
             or {
-                dst[p] = img.pixels[pixel_pos];
+                dst[p]    = img.pixels[pixel_pos];
                 pixel_pos = pixel_pos + 1;
             }
 
-            p = p + 1;
+            p       = p + 1;
             row_pos = row_pos + 1;
             if (row_pos == row_len) { row_pos = 0; }
             n = n + 1;
         }
 
-        checksum = adler.update(checksum, ?dst[block_off], block_len);
+        checksum  = adler.update(checksum, ?dst[block_off], block_len);
         remaining = remaining - block_len;
     }
 
@@ -1042,12 +1042,12 @@ pub fun png_encode(img: *Image, dst: *u8, dst_len: usize) res[usize, EncodeError
     ret res[usize, EncodeError].ok{p};
 }
 
-var png_raw: [256]u8;
-var png_pix: [256]u8;
-var png_work: [33280]u8;   # inflate window plus a small raster
-var png_enc: [4096]u8;
-var png_enc_src: [256]u8;
-var png_enc_rt: [256]u8;
+var png_raw:       [256]u8;
+var png_pix:       [256]u8;
+var png_work:      [33280]u8; # inflate window plus a small raster
+var png_enc:       [4096]u8;
+var png_enc_src:   [256]u8;
+var png_enc_rt:    [256]u8;
 var png_block_src: [65536]u8;
 var png_block_enc: [65610]u8;
 
@@ -1122,7 +1122,7 @@ var rgb16_raw: [38]u8 = [38]u8{
     0, 18, 52, 86, 120, 154, 188, 1, 0, 1, 255, 255, 255, 170, 187, 204, 221, 238, 255, 4, 238,
     204, 170, 136, 102, 68, 128, 0, 128, 137, 230, 2, 104, 121, 138, 120, 26, 186
 };
-var rgb16_trns: [6]u8 = [6]u8{18, 52, 86, 120, 154, 188};
+var rgb16_trns:   [6]u8  = [6]u8{18, 52, 86, 120, 154, 188};
 var rgb16_expect: [24]u8 = [24]u8{
     18, 86, 154, 0, 1, 1, 255, 255, 170, 204, 238, 255, 0, 0, 0, 255, 128, 128, 128, 255, 18,
     86, 154, 255
@@ -1138,20 +1138,20 @@ var pal8_expect: [32]u8 = [32]u8{
 };
 
 # packed samples are MSB-first and each row ends on a byte boundary
-var gray1_raw: [2]u8 = [2]u8{0, 168};
+var gray1_raw:    [2]u8  = [2]u8{0, 168};
 var gray1_expect: [20]u8 = [20]u8{
     255, 255, 255, 255, 0, 0, 0, 255, 255, 255, 255, 255, 0, 0, 0, 255, 255, 255, 255, 255
 };
-var gray2_raw: [3]u8 = [3]u8{0, 27, 0};
+var gray2_raw:    [3]u8  = [3]u8{0, 27, 0};
 var gray2_expect: [20]u8 = [20]u8{
     0, 0, 0, 255, 85, 85, 85, 255, 170, 170, 170, 255, 255, 255, 255, 255, 0, 0, 0, 255
 };
-var gray4_raw: [3]u8 = [3]u8{0, 10, 240};
-var gray4_trns: [2]u8 = [2]u8{0, 10};
+var gray4_raw:    [3]u8  = [3]u8{0, 10, 240};
+var gray4_trns:   [2]u8  = [2]u8{0, 10};
 var gray4_expect: [12]u8 = [12]u8{
     0, 0, 0, 255, 170, 170, 170, 0, 255, 255, 255, 255
 };
-var pal2_raw: [3]u8 = [3]u8{0, 27, 64};
+var pal2_raw:    [3]u8  = [3]u8{0, 27, 64};
 var pal2_expect: [20]u8 = [20]u8{
     255, 0, 0, 0, 0, 255, 0, 128, 0, 0, 255, 255, 255, 255, 0, 255, 0, 255, 0, 128
 };
@@ -1316,14 +1316,14 @@ fun passed(r: err[DecodeError]) u8 {
 
 # whether a step was refused with the case want names
 fun step_refused(r: err[DecodeError], want: DecodeError) u8 {
-    if (!sel r.err) { ret 0; }
+    if (!sel r.err)                           { ret 0; }
     if (!same_case[DecodeError](r.err, want)) { ret 0; }
     ret 1;
 }
 
 # whether a decode was refused with the case want names
 fun refused[T](r: res[T, DecodeError], want: DecodeError) u8 {
-    if (!sel r.err) { ret 0; }
+    if (!sel r.err)                           { ret 0; }
     if (!same_case[DecodeError](r.err, want)) { ret 0; }
     ret 1;
 }
@@ -1366,19 +1366,19 @@ test "png: every scanline filter reconstructs the same image" {
     test_ctx(?hdr, ?ctx, 4, 3, 8, PNG_COLOR_RGB, 0);
 
     if (passed(run_raster(?hdr, ?ctx, ?flt0_raw[0], 39)) == 0) { ret 1; }
-    if (!raw_equal(?png_pix[0], ?flt_expect[0], 48)) { ret 1; }
+    if (!raw_equal(?png_pix[0], ?flt_expect[0], 48))           { ret 1; }
 
     if (passed(run_raster(?hdr, ?ctx, ?flt1_raw[0], 39)) == 0) { ret 2; }
-    if (!raw_equal(?png_pix[0], ?flt_expect[0], 48)) { ret 2; }
+    if (!raw_equal(?png_pix[0], ?flt_expect[0], 48))           { ret 2; }
 
     if (passed(run_raster(?hdr, ?ctx, ?flt2_raw[0], 39)) == 0) { ret 3; }
-    if (!raw_equal(?png_pix[0], ?flt_expect[0], 48)) { ret 3; }
+    if (!raw_equal(?png_pix[0], ?flt_expect[0], 48))           { ret 3; }
 
     if (passed(run_raster(?hdr, ?ctx, ?flt3_raw[0], 39)) == 0) { ret 4; }
-    if (!raw_equal(?png_pix[0], ?flt_expect[0], 48)) { ret 4; }
+    if (!raw_equal(?png_pix[0], ?flt_expect[0], 48))           { ret 4; }
 
     if (passed(run_raster(?hdr, ?ctx, ?flt4_raw[0], 39)) == 0) { ret 5; }
-    if (!raw_equal(?png_pix[0], ?flt_expect[0], 48)) { ret 5; }
+    if (!raw_equal(?png_pix[0], ?flt_expect[0], 48))           { ret 5; }
     ret 0;
 }
 
@@ -1388,11 +1388,11 @@ test "png: adam7 and progressive forms of one image agree" {
 
     test_ctx(?hdr, ?ctx, 7, 5, 8, PNG_COLOR_RGB, 0);
     if (passed(run_raster(?hdr, ?ctx, ?adam7_progressive_raw[0], 110)) == 0) { ret 1; }
-    if (!raw_equal(?png_pix[0], ?adam7_expect[0], 140)) { ret 1; }
+    if (!raw_equal(?png_pix[0], ?adam7_expect[0], 140))                      { ret 1; }
 
     test_ctx(?hdr, ?ctx, 7, 5, 8, PNG_COLOR_RGB, 1);
     if (passed(run_raster(?hdr, ?ctx, ?adam7_interlaced_raw[0], 116)) == 0) { ret 2; }
-    if (!raw_equal(?png_pix[0], ?adam7_expect[0], 140)) { ret 2; }
+    if (!raw_equal(?png_pix[0], ?adam7_expect[0], 140))                     { ret 2; }
     ret 0;
 }
 
@@ -1405,7 +1405,7 @@ test "png: 16-bit samples reduce to the high byte" {
     ctx.trns_len = 6;
 
     if (passed(run_raster(?hdr, ?ctx, ?rgb16_raw[0], 38)) == 0) { ret 1; }
-    if (!raw_equal(?png_pix[0], ?rgb16_expect[0], 24)) { ret 1; }
+    if (!raw_equal(?png_pix[0], ?rgb16_expect[0], 24))          { ret 1; }
     ret 0;
 }
 
@@ -1420,7 +1420,7 @@ test "png: palette expands through a partial tRNS" {
     ctx.trns_len     = 2;
 
     if (passed(run_raster(?hdr, ?ctx, ?pal8_raw[0], 10)) == 0) { ret 1; }
-    if (!raw_equal(?png_pix[0], ?pal8_expect[0], 32)) { ret 1; }
+    if (!raw_equal(?png_pix[0], ?pal8_expect[0], 32))          { ret 1; }
     ret 0;
 }
 
@@ -1430,18 +1430,18 @@ test "png: sub-byte grayscale unpacks and scales stored samples" {
 
     test_ctx(?hdr, ?ctx, 5, 1, 1, PNG_COLOR_GRAY, 0);
     if (passed(run_raster(?hdr, ?ctx, ?gray1_raw[0], 2)) == 0) { ret 1; }
-    if (!raw_equal(?png_pix[0], ?gray1_expect[0], 20)) { ret 1; }
+    if (!raw_equal(?png_pix[0], ?gray1_expect[0], 20))         { ret 1; }
 
     test_ctx(?hdr, ?ctx, 5, 1, 2, PNG_COLOR_GRAY, 0);
     if (passed(run_raster(?hdr, ?ctx, ?gray2_raw[0], 3)) == 0) { ret 2; }
-    if (!raw_equal(?png_pix[0], ?gray2_expect[0], 20)) { ret 2; }
+    if (!raw_equal(?png_pix[0], ?gray2_expect[0], 20))         { ret 2; }
 
     test_ctx(?hdr, ?ctx, 3, 1, 4, PNG_COLOR_GRAY, 0);
     ctx.has_trns = 1;
     ctx.trns     = ?gray4_trns[0];
     ctx.trns_len = 2;
     if (passed(run_raster(?hdr, ?ctx, ?gray4_raw[0], 3)) == 0) { ret 3; }
-    if (!raw_equal(?png_pix[0], ?gray4_expect[0], 12)) { ret 3; }
+    if (!raw_equal(?png_pix[0], ?gray4_expect[0], 12))         { ret 3; }
     ret 0;
 }
 
@@ -1456,7 +1456,7 @@ test "png: sub-byte palette uses row padding and partial tRNS" {
     ctx.trns_len     = 2;
 
     if (passed(run_raster(?hdr, ?ctx, ?pal2_raw[0], 3)) == 0) { ret 1; }
-    if (!raw_equal(?png_pix[0], ?pal2_expect[0], 20)) { ret 1; }
+    if (!raw_equal(?png_pix[0], ?pal2_expect[0], 20))         { ret 1; }
     ret 0;
 }
 
@@ -1466,7 +1466,7 @@ test "png: gray+alpha carries its alpha channel" {
     test_ctx(?hdr, ?ctx, 4, 2, 8, PNG_COLOR_GRAY_ALPHA, 0);
 
     if (passed(run_raster(?hdr, ?ctx, ?ga8_raw[0], 18)) == 0) { ret 1; }
-    if (!raw_equal(?png_pix[0], ?ga8_expect[0], 32)) { ret 1; }
+    if (!raw_equal(?png_pix[0], ?ga8_expect[0], 32))          { ret 1; }
     ret 0;
 }
 
@@ -1485,7 +1485,7 @@ test "png: raster rejects an undefined filter type" {
     test_ctx(?hdr, ?ctx, 4, 3, 8, PNG_COLOR_RGB, 0);
 
     raw_copy(?png_raw[0], ?flt0_raw[0], 39);
-    png_raw[0] = 5;   # only 0-4 are defined
+    png_raw[0] = 5; # only 0-4 are defined
     if (step_refused(decode_raster(?hdr, ?ctx, ?png_raw[0], 39, ?png_pix[0]), DecodeError.corrupt{}) == 0) { ret 1; }
     ret 0;
 }
@@ -1495,7 +1495,7 @@ test "png: raster rejects a palette index past the palette" {
     var ctx: PngCtx;
     test_ctx(?hdr, ?ctx, 4, 2, 8, PNG_COLOR_PALETTE, 0);
     ctx.plte         = ?pal8_plte[0];
-    ctx.plte_entries = 2;   # the fixture indexes entries 0-3
+    ctx.plte_entries = 2; # the fixture indexes entries 0-3
 
     if (step_refused(run_raster(?hdr, ?ctx, ?pal8_raw[0], 10), DecodeError.corrupt{}) == 0) { ret 1; }
     ret 0;
@@ -1506,8 +1506,8 @@ test "png: info reads a well-formed header" {
     if (!sel r.ok) { ret 1; }
     val img: Image = r.ok;
     if (img.width != 4 || img.height != 2) { ret 1; }
-    if (img.channels != 3) { ret 1; }
-    if (img.pixels != nil) { ret 1; }
+    if (img.channels != 3)                 { ret 1; }
+    if (img.pixels != nil)                 { ret 1; }
     ret 0;
 }
 
@@ -1524,30 +1524,30 @@ test "png: info rejects a bad chunk crc" {
 }
 
 test "png: unknown chunks honor the critical bit" {
-    if (refused[Image](png_info(?file_unknown_critical[0], 79), DecodeError.unsupported{}) == 0) { ret 1; }
+    if (refused[Image](png_info(?file_unknown_critical[0], 79), DecodeError.unsupported{}) == 0)        { ret 1; }
     if (refused[usize](png_scratch_len(?file_unknown_critical[0], 79), DecodeError.unsupported{}) == 0) { ret 2; }
-    if (decoded[Image](png_info(?file_unknown_ancillary[0], 79)) == 0)        { ret 3; }
+    if (decoded[Image](png_info(?file_unknown_ancillary[0], 79)) == 0)                                  { ret 3; }
     if (decoded[Image](png_decode(?file_unknown_ancillary[0], 79, ?png_pix[0], 256,
-                   ?png_work[0], 33280)) == 0)                 { ret 4; }
-    if (png_pix[0] != 42 || png_pix[1] != 42 || png_pix[2] != 42 || png_pix[3] != 255) { ret 5; }
+        ?png_work[0], 33280)) == 0) { ret 4; }
+    if (png_pix[0] != 42 || png_pix[1] != 42 || png_pix[2] != 42 || png_pix[3] != 255)            { ret 5; }
     if (refused[Image](png_info(?file_invalid_chunk_type[0], 79), DecodeError.bad_header{}) == 0) { ret 6; }
     ret 0;
 }
 
 test "png: info enforces PLTE placement and color types" {
-    if (refused[Image](png_info(?file_gray_plte[0], 82), DecodeError.bad_header{}) == 0)       { ret 1; }
+    if (refused[Image](png_info(?file_gray_plte[0], 82), DecodeError.bad_header{}) == 0)         { ret 1; }
     if (refused[Image](png_info(?file_trns_before_plte[0], 102), DecodeError.bad_header{}) == 0) { ret 2; }
     ret 0;
 }
 
 test "png: tRNS masks bits above the image depth" {
     val r: res[Image, DecodeError] = png_decode(?file_trns_mask[0], 81, ?png_pix[0], 256, ?png_work[0], 33280);
-    if (!sel r.ok)            { ret 1; }
-    if (r.ok.channels != 4)   { ret 2; }
+    if (!sel r.ok)                                                                   { ret 1; }
+    if (r.ok.channels != 4)                                                          { ret 2; }
     if (png_pix[0] != 42 || png_pix[1] != 42 || png_pix[2] != 42 || png_pix[3] != 0) { ret 3; }
 
     if (decoded[Image](png_decode(?file_rgb_trns_mask[0], 87, ?png_pix[0], 256,
-                   ?png_work[0], 33280)) == 0) { ret 4; }
+        ?png_work[0], 33280)) == 0) { ret 4; }
     if (png_pix[0] != 1 || png_pix[1] != 2 || png_pix[2] != 3 || png_pix[3] != 0) { ret 5; }
     ret 0;
 }
@@ -1560,12 +1560,12 @@ test "png: info rejects a truncated stream" {
 
 test "png: sub-byte grayscale decodes through the public API" {
     val info: res[Image, DecodeError] = png_info(?file_gray1[0], 69);
-    if (!sel info.ok) { ret 1; }
+    if (!sel info.ok)                                                       { ret 1; }
     if (info.ok.width != 4 || info.ok.height != 2 || info.ok.channels != 3) { ret 2; }
     if (decoded[Image](png_decode(?file_gray1[0], 69, ?png_pix[0], 256,
-                   ?png_work[0], 33280)) == 0) { ret 3; }
+        ?png_work[0], 33280)) == 0) { ret 3; }
     if (png_pix[0] != 255 || png_pix[4] != 0 || png_pix[8] != 255 || png_pix[12] != 255) { ret 4; }
-    if (png_pix[16] != 0 || png_pix[20] != 255 || png_pix[24] != 0 || png_pix[28] != 0) { ret 5; }
+    if (png_pix[16] != 0 || png_pix[20] != 255 || png_pix[24] != 0 || png_pix[28] != 0)  { ret 5; }
     ret 0;
 }
 
@@ -1577,17 +1577,17 @@ test "png: info rejects undefined header fields" {
 }
 
 test "png: info rejects dimensions whose raster overflows" {
-    if (refused[Image](png_info(?file_huge[0], 66), DecodeError.bad_header{}) == 0) { ret 1; }
+    if (refused[Image](png_info(?file_huge[0], 66), DecodeError.bad_header{}) == 0)        { ret 1; }
     if (refused[usize](png_scratch_len(?file_huge[0], 66), DecodeError.bad_header{}) == 0) { ret 2; }
     ret 0;
 }
 
 test "png: info enforces the chunk ordering rules" {
-    if (refused[Image](png_info(?file_no_idat[0], 45), DecodeError.bad_header{}) == 0)      { ret 1; }
-    if (refused[Image](png_info(?file_idat_bad_crc[0], 84), DecodeError.corrupt{}) == 0)    { ret 2; }
-    if (refused[Image](png_info(?file_split_idat[0], 111), DecodeError.bad_header{}) == 0)  { ret 3; }
+    if (refused[Image](png_info(?file_no_idat[0], 45), DecodeError.bad_header{}) == 0)     { ret 1; }
+    if (refused[Image](png_info(?file_idat_bad_crc[0], 84), DecodeError.corrupt{}) == 0)   { ret 2; }
+    if (refused[Image](png_info(?file_split_idat[0], 111), DecodeError.bad_header{}) == 0) { ret 3; }
     # the same two chunks are fine when nothing breaks the run
-    if (decoded[Image](png_info(?file_two_idat[0], 96)) == 0)             { ret 4; }
+    if (decoded[Image](png_info(?file_two_idat[0], 96)) == 0) { ret 4; }
     ret 0;
 }
 
@@ -1595,30 +1595,30 @@ test "png: scratch_len covers the window and the raster" {
     # 4x2 RGB8 filters to 2 * (1 + 12) = 26 raster bytes, plus the spare byte
     # that catches an over-long stream, on top of the inflate window.
     val ok: res[usize, DecodeError] = png_scratch_len(?file_ok[0], 84);
-    if (!sel ok.ok) { ret 1; }
+    if (!sel ok.ok)                       { ret 1; }
     if (ok.ok != PNG_WINDOW_SCRATCH + 27) { ret 1; }
     val two: res[usize, DecodeError] = png_scratch_len(?file_two_idat[0], 96);
-    if (!sel two.ok) { ret 2; }
-    if (two.ok != PNG_WINDOW_SCRATCH + 27) { ret 2; }
+    if (!sel two.ok)                                                                       { ret 2; }
+    if (two.ok != PNG_WINDOW_SCRATCH + 27)                                                 { ret 2; }
     if (refused[usize](png_scratch_len(?file_bad_crc[0], 84), DecodeError.corrupt{}) == 0) { ret 3; }
     ret 0;
 }
 
 test "png: decode a whole file end to end" {
     val scratch_need: res[usize, DecodeError] = png_scratch_len(?file_ok[0], 84);
-    if (!sel scratch_need.ok) { ret 1; }
+    if (!sel scratch_need.ok)    { ret 1; }
     if (scratch_need.ok > 33280) { ret 1; }
 
     val r: res[Image, DecodeError] = png_decode(?file_ok[0], 84, ?png_pix[0], 256, ?png_work[0], 33280);
     if (!sel r.ok) { ret 2; }
     val img: Image = r.ok;
     if (img.width != 4 || img.height != 2 || img.channels != 3) { ret 3; }
-    if (img.pixels != ?png_pix[0]) { ret 4; }
+    if (img.pixels != ?png_pix[0])                              { ret 4; }
 
     # the file stores 1..24 as two RGB8 scanlines, so every pixel is opaque
     var i: usize = 0;
     for (i < 8) {
-        if (png_pix[i * 4]     != (i * 3 + 1)::u8) { ret 5; }
+        if (png_pix[i * 4] != (i * 3 + 1)::u8)     { ret 5; }
         if (png_pix[i * 4 + 1] != (i * 3 + 2)::u8) { ret 5; }
         if (png_pix[i * 4 + 2] != (i * 3 + 3)::u8) { ret 5; }
         if (png_pix[i * 4 + 3] != 255)             { ret 5; }
@@ -1639,34 +1639,34 @@ test "png: decode reassembles a zlib stream split across IDAT chunks" {
 
 test "png: decode ignores unused trailing IDAT bytes" {
     if (decoded[Image](png_decode(?file_trailing_in_idat[0], 70, ?png_pix[0], 256,
-                   ?png_work[0], 33280)) == 0) { ret 1; }
+        ?png_work[0], 33280)) == 0) { ret 1; }
     if (png_pix[0] != 42 || png_pix[1] != 42 || png_pix[2] != 42 || png_pix[3] != 255) { ret 2; }
 
     if (decoded[Image](png_decode(?file_trailing_idat[0], 82, ?png_pix[0], 256,
-                   ?png_work[0], 33280)) == 0) { ret 3; }
+        ?png_work[0], 33280)) == 0) { ret 3; }
     if (png_pix[0] != 42 || png_pix[1] != 42 || png_pix[2] != 42 || png_pix[3] != 255) { ret 4; }
     ret 0;
 }
 
 test "png: decode rejects short destination and scratch" {
     val dst: res[Image, DecodeError] = png_decode(?file_ok[0], 84, ?png_pix[0], 4, ?png_work[0], 33280);
-    if (!sel dst.err) { ret 1; }
-    if (!sel dst.err.short_buffer) { ret 1; }
+    if (!sel dst.err)               { ret 1; }
+    if (!sel dst.err.short_buffer)  { ret 1; }
     if (dst.err.short_buffer != 32) { ret 1; }
 
     # png_scratch_len is exact, not a lower bound: one byte less must be refused
     # and exactly that many must succeed.
     val need: res[usize, DecodeError] = png_scratch_len(?file_ok[0], 84);
-    if (!sel need.ok) { ret 2; }
+    if (!sel need.ok)    { ret 2; }
     if (need.ok > 33280) { ret 2; }
 
     val scratch: res[Image, DecodeError] = png_decode(?file_ok[0], 84, ?png_pix[0], 256, ?png_work[0], 64);
-    if (!sel scratch.err) { ret 3; }
-    if (!sel scratch.err.short_scratch) { ret 3; }
+    if (!sel scratch.err)                     { ret 3; }
+    if (!sel scratch.err.short_scratch)       { ret 3; }
     if (scratch.err.short_scratch != need.ok) { ret 3; }
 
     if (refused[Image](png_decode(?file_ok[0], 84, ?png_pix[0], 256, ?png_work[0], need.ok - 1),
-                DecodeError.short_scratch{0}) == 0) { ret 4; }
+        DecodeError.short_scratch{0}) == 0) { ret 4; }
     if (decoded[Image](png_decode(?file_ok[0], 84, ?png_pix[0], 256, ?png_work[0], need.ok)) == 0) { ret 5; }
     ret 0;
 }
@@ -1706,10 +1706,10 @@ test "png: adam7 pass extents cover every pixel" {
         var h: usize = 1;
         for (h <= 16) {
             var total: usize = 0;
-            var p: usize = 0;
+            var p:     usize = 0;
             for (p < 7) {
                 total = total + pass_extent(w, adam7_x_start[p]::usize, adam7_x_step[p]::usize)
-                              * pass_extent(h, adam7_y_start[p]::usize, adam7_y_step[p]::usize);
+                    * pass_extent(h, adam7_y_start[p]::usize, adam7_y_step[p]::usize);
                 p = p + 1;
             }
             if (total != w * h) { ret 1; }
@@ -1734,31 +1734,31 @@ test "png: encode matches an independently decoded golden" {
     src.colorspace = COLORSPACE_SRGB;
 
     val bound: res[usize, EncodeError] = png_encode_bound(1, 1);
-    if (!sel bound.ok) { ret 1; }
+    if (!sel bound.ok)  { ret 1; }
     if (bound.ok != 73) { ret 1; }
     val enc: res[usize, EncodeError] = png_encode(?src, ?png_enc[0], 4096);
-    if (!sel enc.ok) { ret 2; }
-    if (enc.ok != 73) { ret 2; }
+    if (!sel enc.ok)                                     { ret 2; }
+    if (enc.ok != 73)                                    { ret 2; }
     if (!raw_equal(?png_enc[0], ?png_enc_golden[0], 73)) { ret 3; }
 
     # the exact file also pins chunk layout, CRCs, zlib framing, and Adler-32.
     if (read_be32(?png_enc[0], 8) != 13 || read_be32(?png_enc[0], 33) != 16) { ret 4; }
-    if (crc.hash(?png_enc[12], 17) != read_be32(?png_enc[0], 29)) { ret 5; }
-    if (crc.hash(?png_enc[37], 20) != read_be32(?png_enc[0], 57)) { ret 6; }
-    if (png_enc[41] != 0x78 || png_enc[42] != 0x01) { ret 7; }
-    if (read_be32(?png_enc[0], 53) != 0x020D0115) { ret 8; }
-    if (crc.hash(?png_enc[65], 4) != read_be32(?png_enc[0], 69)) { ret 9; }
+    if (crc.hash(?png_enc[12], 17) != read_be32(?png_enc[0], 29))            { ret 5; }
+    if (crc.hash(?png_enc[37], 20) != read_be32(?png_enc[0], 57))            { ret 6; }
+    if (png_enc[41] != 0x78 || png_enc[42] != 0x01)                          { ret 7; }
+    if (read_be32(?png_enc[0], 53) != 0x020D0115)                            { ret 8; }
+    if (crc.hash(?png_enc[65], 4) != read_be32(?png_enc[0], 69))             { ret 9; }
     ret 0;
 }
 
 test "png: encode then decode round-trips RGBA8" {
-    val w: u32 = 8;
-    val h: u32 = 8;
+    val w:     u32   = 8;
+    val h:     u32   = 8;
     val bytes: usize = w::usize * h::usize * 4;
-    var i: usize = 0;
+    var i:     usize = 0;
     for (i < bytes) {
         png_enc_src[i] = (i * 37 + i / 4 * 11)::u8;
-        i = i + 1;
+        i              = i + 1;
     }
 
     var src: Image;
@@ -1769,10 +1769,10 @@ test "png: encode then decode round-trips RGBA8" {
     src.colorspace = COLORSPACE_LINEAR;
 
     val bound: res[usize, EncodeError] = png_encode_bound(w, h);
-    if (!sel bound.ok) { ret 1; }
+    if (!sel bound.ok)   { ret 1; }
     if (bound.ok > 4096) { ret 1; }
     val enc: res[usize, EncodeError] = png_encode(?src, ?png_enc[0], 4096);
-    if (!sel enc.ok) { ret 2; }
+    if (!sel enc.ok)        { ret 2; }
     if (enc.ok != bound.ok) { ret 2; }
     val n: usize = enc.ok;
 
@@ -1783,10 +1783,10 @@ test "png: encode then decode round-trips RGBA8" {
         || info.colorspace != COLORSPACE_SRGB) { ret 4; }
 
     val scratch: res[usize, DecodeError] = png_scratch_len(?png_enc[0], n);
-    if (!sel scratch.ok) { ret 5; }
+    if (!sel scratch.ok)    { ret 5; }
     if (scratch.ok > 33280) { ret 5; }
     if (decoded[Image](png_decode(?png_enc[0], n, ?png_enc_rt[0], 256,
-                   ?png_work[0], scratch.ok)) == 0) { ret 6; }
+        ?png_work[0], scratch.ok)) == 0) { ret 6; }
     if (!raw_equal(?png_enc_src[0], ?png_enc_rt[0], bytes)) { ret 7; }
     ret 0;
 }
@@ -1805,10 +1805,13 @@ test "png: encode rejects invalid input and short buffers without writing" {
     src.colorspace = COLORSPACE_SRGB;
 
     var i: usize = 0;
-    for (i < 73) { png_enc[i] = 0xA5; i = i + 1; }
+    for (i < 73) {
+        png_enc[i] = 0xA5;
+        i          = i + 1;
+    }
     val short: res[usize, EncodeError] = png_encode(?src, ?png_enc[0], 72);
-    if (!sel short.err) { ret 1; }
-    if (!sel short.err.short_buffer) { ret 1; }
+    if (!sel short.err)               { ret 1; }
+    if (!sel short.err.short_buffer)  { ret 1; }
     if (short.err.short_buffer != 73) { ret 1; }
     i = 0;
     for (i < 73) {
@@ -1818,24 +1821,24 @@ test "png: encode rejects invalid input and short buffers without writing" {
 
     src.channels = 2;
     val channels: res[usize, EncodeError] = png_encode(?src, ?png_enc[0], 73);
-    if (!sel channels.err) { ret 3; }
+    if (!sel channels.err)          { ret 3; }
     if (!sel channels.err.channels) { ret 3; }
     ret 0;
 }
 
 test "png: encode bound rejects zero and unrepresentable dimensions" {
     val wide: res[usize, EncodeError] = png_encode_bound(0, 1);
-    if (!sel wide.err) { ret 1; }
+    if (!sel wide.err)       { ret 1; }
     if (!sel wide.err.empty) { ret 1; }
     val tall: res[usize, EncodeError] = png_encode_bound(1, 0);
-    if (!sel tall.err) { ret 2; }
+    if (!sel tall.err)       { ret 2; }
     if (!sel tall.err.empty) { ret 2; }
     val huge: res[usize, EncodeError] = png_encode_bound(0xFFFFFFFF, 0xFFFFFFFF);
-    if (!sel huge.err) { ret 3; }
+    if (!sel huge.err)           { ret 3; }
     if (!sel huge.err.too_large) { ret 3; }
     # even where usize can represent the raster, one IDAT cannot exceed 2^31-1.
     val idat: res[usize, EncodeError] = png_encode_bound(0xFFFFFFFF, 1);
-    if (!sel idat.err) { ret 4; }
+    if (!sel idat.err)           { ret 4; }
     if (!sel idat.err.too_large) { ret 4; }
     ret 0;
 }
@@ -1843,14 +1846,14 @@ test "png: encode bound rejects zero and unrepresentable dimensions" {
 # whether stored_deflate_len of raw_len is want
 fun stored_len_is(raw_len: usize, want: usize) u8 {
     val got: opt[usize] = stored_deflate_len(raw_len);
-    if (!sel got.some) { ret 0; }
+    if (!sel got.some)    { ret 0; }
     if (got.some != want) { ret 0; }
     ret 1;
 }
 
 test "png: stored block headers cover empty and length boundaries" {
-    if (stored_block_count(0) != 1 || stored_len_is(0, 5) == 0) { ret 1; }
-    if (stored_block_count(1) != 1 || stored_len_is(1, 6) == 0) { ret 2; }
+    if (stored_block_count(0) != 1 || stored_len_is(0, 5) == 0)             { ret 1; }
+    if (stored_block_count(1) != 1 || stored_len_is(1, 6) == 0)             { ret 2; }
     if (stored_block_count(65535) != 1 || stored_len_is(65535, 65540) == 0) { ret 3; }
     if (stored_block_count(65536) != 2 || stored_len_is(65536, 65546) == 0) { ret 4; }
 
@@ -1875,10 +1878,10 @@ test "png: stored block headers cover empty and length boundaries" {
 # whether img's bound and its encoding into dst are both want bytes
 fun encodes_to(img: *Image, dst: *u8, dst_len: usize, want: usize) u8 {
     val bound: res[usize, EncodeError] = png_encode_bound(img.width, img.height);
-    if (!sel bound.ok) { ret 0; }
+    if (!sel bound.ok)    { ret 0; }
     if (bound.ok != want) { ret 0; }
     val n: res[usize, EncodeError] = png_encode(img, dst, dst_len);
-    if (!sel n.ok) { ret 0; }
+    if (!sel n.ok)    { ret 0; }
     if (n.ok != want) { ret 0; }
     ret 1;
 }
@@ -1887,7 +1890,7 @@ test "png: encode marks an exact 65535-byte stored block final" {
     var i: usize = 0;
     for (i < 52428) {
         png_block_src[i] = (i * 29 + 7)::u8;
-        i = i + 1;
+        i                = i + 1;
     }
 
     var src: Image;
@@ -1898,7 +1901,7 @@ test "png: encode marks an exact 65535-byte stored block final" {
     src.colorspace = COLORSPACE_SRGB;
 
     if (encodes_to(?src, ?png_block_enc[0], 65610, 65603) == 0) { ret 1; }
-    if (read_be32(?png_block_enc[0], 33) != 65546) { ret 3; }
+    if (read_be32(?png_block_enc[0], 33) != 65546)              { ret 3; }
 
     # zlib header, one final stored header, LEN, and NLEN.
     if (png_block_enc[41] != 0x78 || png_block_enc[42] != 0x01) { ret 4; }
@@ -1910,7 +1913,7 @@ test "png: encode marks an exact 65535-byte stored block final" {
         || png_block_enc[53] != 0 || png_block_enc[54] != png_block_src[4]) { ret 6; }
 
     if (read_be32(?png_block_enc[0], 65583) != adler.hash(?png_block_enc[48], 65535)) { ret 7; }
-    if (read_be32(?png_block_enc[0], 65587) != crc.hash(?png_block_enc[37], 65550)) { ret 8; }
+    if (read_be32(?png_block_enc[0], 65587) != crc.hash(?png_block_enc[37], 65550))   { ret 8; }
     ret 0;
 }
 
@@ -1918,7 +1921,7 @@ test "png: encode splits stored data after 65535 bytes" {
     var i: usize = 0;
     for (i < 65536) {
         png_block_src[i] = (i * 17 + i / 251)::u8;
-        i = i + 1;
+        i                = i + 1;
     }
 
     var src: Image;
@@ -1929,7 +1932,7 @@ test "png: encode splits stored data after 65535 bytes" {
     src.colorspace = COLORSPACE_SRGB;
 
     if (encodes_to(?src, ?png_block_enc[0], 65610, 65610) == 0) { ret 1; }
-    if (read_be32(?png_block_enc[0], 33) != 65553) { ret 3; }
+    if (read_be32(?png_block_enc[0], 33) != 65553)              { ret 3; }
 
     # the first full block is non-final and the second carries the last 2 bytes.
     if (png_block_enc[43] != 0 || png_block_enc[44] != 255 || png_block_enc[45] != 255
@@ -1942,7 +1945,7 @@ test "png: encode splits stored data after 65535 bytes" {
     var sum: u32 = adler.init();
     sum = adler.update(sum, ?png_block_enc[48], 65535);
     sum = adler.update(sum, ?png_block_enc[65588], 2);
-    if (read_be32(?png_block_enc[0], 65590) != sum) { ret 7; }
+    if (read_be32(?png_block_enc[0], 65590) != sum)                                 { ret 7; }
     if (read_be32(?png_block_enc[0], 65594) != crc.hash(?png_block_enc[37], 65557)) { ret 8; }
     ret 0;
 }

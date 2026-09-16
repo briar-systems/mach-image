@@ -8,19 +8,19 @@
 # images are recognized but reported as unsupported. the encoder emits a minimal
 # uncompressed 32-bit top-left file, enough for tooling round-trips.
 
+use image.codec.COLORSPACE_SRGB;
+use image.codec.DecodeError;
+use image.codec.EncodeError;
+use image.codec.Image;
+use image.codec.image_byte_len;
+use image.codec.same_case;
 use std.types.error.err;
 use std.types.option.opt;
 use std.types.result.res;
 use std.types.size.usize;
-use image.codec.Image;
-use image.codec.image_byte_len;
-use image.codec.same_case;
-use image.codec.COLORSPACE_SRGB;
-use image.codec.DecodeError;
-use image.codec.EncodeError;
 
-val TGA_TYPE_TRUECOLOR:     u8 = 2;    # uncompressed truecolor
-val TGA_TYPE_TRUECOLOR_RLE: u8 = 10;   # run-length encoded truecolor
+val TGA_TYPE_TRUECOLOR:     u8    = 2; # uncompressed truecolor
+val TGA_TYPE_TRUECOLOR_RLE: u8    = 10; # run-length encoded truecolor
 val TGA_HEADER_LEN:         usize = 18;
 
 fun read_le16(p: *u8, off: usize) u16 {
@@ -57,17 +57,17 @@ fun read_bgra(src: *u8, pos: *usize, src_len: usize, bpp: usize, out: *Bgra) err
 # reverse the row order of a width x height RGBA8 buffer in place
 fun flip_rows(dst: *u8, width: usize, height: usize) {
     val row_bytes: usize = width * 4;
-    var top: usize = 0;
-    var bot: usize = height - 1;
+    var top:       usize = 0;
+    var bot:       usize = height - 1;
     for (top < bot) {
         val top_base: usize = top * row_bytes;
         val bot_base: usize = bot * row_bytes;
-        var i: usize = 0;
+        var i:        usize = 0;
         for (i < row_bytes) {
             val t: u8 = dst[top_base + i];
             dst[top_base + i] = dst[bot_base + i];
             dst[bot_base + i] = t;
-            i = i + 1;
+            i                 = i + 1;
         }
         top = top + 1;
         bot = bot - 1;
@@ -77,22 +77,22 @@ fun flip_rows(dst: *u8, width: usize, height: usize) {
 # reverse each row of a width x height RGBA8 buffer in place
 fun flip_cols(dst: *u8, width: usize, height: usize) {
     val row_bytes: usize = width * 4;
-    var row: usize = 0;
+    var row:       usize = 0;
     for (row < height) {
-        val base: usize = row * row_bytes;
-        var left: usize = 0;
+        val base:  usize = row * row_bytes;
+        var left:  usize = 0;
         var right: usize = width - 1;
         for (left < right) {
             val lp: usize = base + left * 4;
             val rp: usize = base + right * 4;
-            var c: usize = 0;
+            var c:  usize = 0;
             for (c < 4) {
                 val t: u8 = dst[lp + c];
                 dst[lp + c] = dst[rp + c];
                 dst[rp + c] = t;
-                c = c + 1;
+                c           = c + 1;
             }
-            left = left + 1;
+            left  = left + 1;
             right = right - 1;
         }
         row = row + 1;
@@ -102,8 +102,8 @@ fun flip_cols(dst: *u8, width: usize, height: usize) {
 # decode uncompressed truecolor pixels into dst in storage order
 fun decode_raw(src: *u8, src_len: usize, data_start: usize, dst: *u8, px_count: usize, bpp: usize) err[DecodeError] {
     var pos: usize = data_start;
-    var di: usize = 0;
-    var i: usize = 0;
+    var di:  usize = 0;
+    var i:   usize = 0;
     for (i < px_count) {
         var px: Bgra;
         val rs: err[DecodeError] = read_bgra(src, ?pos, src_len, bpp, ?px);
@@ -112,8 +112,8 @@ fun decode_raw(src: *u8, src_len: usize, data_start: usize, dst: *u8, px_count: 
         dst[di + 1] = px.g;
         dst[di + 2] = px.b;
         dst[di + 3] = px.a;
-        di = di + 4;
-        i = i + 1;
+        di          = di + 4;
+        i           = i + 1;
     }
     ret err[DecodeError].ok{};
 }
@@ -122,8 +122,8 @@ fun decode_raw(src: *u8, src_len: usize, data_start: usize, dst: *u8, px_count: 
 # order. repeat packets are bulk-filled; a run that would overrun the image is
 # clamped to the remaining pixels
 fun decode_rle(src: *u8, src_len: usize, data_start: usize, dst: *u8, px_count: usize, bpp: usize) err[DecodeError] {
-    var pos: usize = data_start;
-    var di: usize = 0;
+    var pos:      usize = data_start;
+    var di:       usize = 0;
     var produced: usize = 0;
     for (produced < px_count) {
         if (pos >= src_len) { ret err[DecodeError].err{DecodeError.truncated{}}; }
@@ -142,8 +142,8 @@ fun decode_rle(src: *u8, src_len: usize, data_start: usize, dst: *u8, px_count: 
                 dst[di + 1] = px.g;
                 dst[di + 2] = px.b;
                 dst[di + 3] = px.a;
-                di = di + 4;
-                k = k + 1;
+                di          = di + 4;
+                k           = k + 1;
             }
         }
         or {
@@ -156,8 +156,8 @@ fun decode_rle(src: *u8, src_len: usize, data_start: usize, dst: *u8, px_count: 
                 dst[di + 1] = px.g;
                 dst[di + 2] = px.b;
                 dst[di + 3] = px.a;
-                di = di + 4;
-                k = k + 1;
+                di          = di + 4;
+                k           = k + 1;
             }
         }
         produced = produced + count;
@@ -195,7 +195,7 @@ pub fun tga_info(src: *u8, src_len: usize) res[Image, DecodeError] {
     if (depth == 32) { channels = 4; }
 
     ret res[Image, DecodeError].ok{Image{
-        pixels: nil, width: width::u32, height: height::u32,
+        pixels:   nil, width: width::u32, height: height::u32,
         channels: channels, colorspace: COLORSPACE_SRGB
     }};
 }
@@ -221,10 +221,10 @@ pub fun tga_decode(src: *u8, src_len: usize, dst: *u8, dst_len: usize) res[Image
     val need:   usize = width * height * 4;
     if (dst_len < need) { ret res[Image, DecodeError].err{DecodeError.short_buffer{need}}; }
 
-    val id_length: usize = src[0]::usize;
-    val image_type: u8   = src[2];
-    val descriptor: u8   = src[17];
-    val bpp: usize       = src[16]::usize / 8;
+    val id_length:  usize = src[0]::usize;
+    val image_type: u8    = src[2];
+    val descriptor: u8    = src[17];
+    val bpp:        usize = src[16]::usize / 8;
 
     # descriptor bits 6-7 select legacy interleaving, which this decoder cannot
     # reorder; reject rather than produce scrambled rows.
@@ -233,7 +233,7 @@ pub fun tga_decode(src: *u8, src_len: usize, dst: *u8, dst_len: usize) res[Image
     val top_to_bottom: u8 = (descriptor >> 5) & 1;
     val right_to_left: u8 = (descriptor >> 4) & 1;
 
-    val px_count: usize = width * height;
+    val px_count:   usize = width * height;
     val data_start: usize = TGA_HEADER_LEN + id_length;
 
     # decode into dst in storage order, then normalize origin with in-place flips.
@@ -250,7 +250,7 @@ pub fun tga_decode(src: *u8, src_len: usize, dst: *u8, dst_len: usize) res[Image
     if (right_to_left != 0) { flip_cols(dst, width, height); }
 
     ret res[Image, DecodeError].ok{Image{
-        pixels: dst, width: header.width, height: header.height,
+        pixels:   dst, width: header.width, height: header.height,
         channels: header.channels, colorspace: header.colorspace
     }};
 }
@@ -265,7 +265,7 @@ pub fun tga_encode_bound(width: u32, height: u32) res[usize, EncodeError] {
     if (width == 0 || height == 0)         { ret res[usize, EncodeError].err{EncodeError.empty{}}; }
     if (width > 0xFFFF || height > 0xFFFF) { ret res[usize, EncodeError].err{EncodeError.too_large{}}; }
     val body: opt[usize] = image_byte_len(width, height);
-    if (!sel body.some) { ret res[usize, EncodeError].err{EncodeError.too_large{}}; }
+    if (!sel body.some)                           { ret res[usize, EncodeError].err{EncodeError.too_large{}}; }
     if (body.some > ~(0::usize) - TGA_HEADER_LEN) { ret res[usize, EncodeError].err{EncodeError.too_large{}}; }
     ret res[usize, EncodeError].ok{TGA_HEADER_LEN + body.some};
 }
@@ -282,28 +282,31 @@ pub fun tga_encode_bound(width: u32, height: u32) res[usize, EncodeError] {
 # ret:     number of bytes written, or why the encode was refused
 pub fun tga_encode(img: *Image, dst: *u8, dst_len: usize) res[usize, EncodeError] {
     val bound: res[usize, EncodeError] = tga_encode_bound(img.width, img.height);
-    if (sel bound.err) { ret res[usize, EncodeError].err{bound.err}; }
+    if (sel bound.err)      { ret res[usize, EncodeError].err{bound.err}; }
     if (dst_len < bound.ok) { ret res[usize, EncodeError].err{EncodeError.short_buffer{bound.ok}}; }
 
     var i: usize = 0;
-    for (i < TGA_HEADER_LEN) { dst[i] = 0; i = i + 1; }
+    for (i < TGA_HEADER_LEN) {
+        dst[i] = 0;
+        i      = i + 1;
+    }
     dst[2] = TGA_TYPE_TRUECOLOR;
     write_le16(dst, 12, img.width::u16);
     write_le16(dst, 14, img.height::u16);
     dst[16] = 32;
-    dst[17] = 0x28;   # bit5 top-to-bottom origin, 8 alpha bits
+    dst[17] = 0x28; # bit5 top-to-bottom origin, 8 alpha bits
 
     val px_count: usize = img.width::usize * img.height::usize;
-    var p: usize = TGA_HEADER_LEN;
+    var p:        usize = TGA_HEADER_LEN;
     i = 0;
     for (i < px_count) {
         val base: usize = i * 4;
-        dst[p]     = img.pixels[base + 2];   # B
-        dst[p + 1] = img.pixels[base + 1];   # G
-        dst[p + 2] = img.pixels[base];       # R
-        dst[p + 3] = img.pixels[base + 3];   # A
-        p = p + 4;
-        i = i + 1;
+        dst[p]     = img.pixels[base + 2]; # B
+        dst[p + 1] = img.pixels[base + 1]; # G
+        dst[p + 2] = img.pixels[base]; # R
+        dst[p + 3] = img.pixels[base + 3]; # A
+        p          = p + 4;
+        i          = i + 1;
     }
     ret res[usize, EncodeError].ok{p};
 }
@@ -314,7 +317,7 @@ var tga_rt:  [4096]u8;
 
 # whether a decode was refused with the case want names
 fun refused(r: res[Image, DecodeError], want: DecodeError) u8 {
-    if (!sel r.err) { ret 0; }
+    if (!sel r.err)                           { ret 0; }
     if (!same_case[DecodeError](r.err, want)) { ret 0; }
     ret 1;
 }
@@ -322,16 +325,16 @@ fun refused(r: res[Image, DecodeError], want: DecodeError) u8 {
 test "tga: decode uncompressed 32-bit top-left" {
     var stream: [26]u8 = [26]u8{
         0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        2, 0,          # width 2
-        1, 0,          # height 1
-        32, 0x20,      # 32-bit, top-to-bottom
-        30, 20, 10, 40,    # pixel0 BGRA -> RGBA(10,20,30,40)
-        70, 60, 50, 80     # pixel1 BGRA -> RGBA(50,60,70,80)
+        2, 0, # width 2
+        1, 0, # height 1
+        32, 0x20, # 32-bit, top-to-bottom
+        30, 20, 10, 40, # pixel0 BGRA -> RGBA(10,20,30,40)
+        70, 60, 50, 80 # pixel1 BGRA -> RGBA(50,60,70,80)
     };
     val r: res[Image, DecodeError] = tga_decode(?stream[0], 26, ?tga_pix[0], 4096);
     if (!sel r.ok) { ret 1; }
     val img: Image = r.ok;
-    if (img.width != 2 || img.height != 1 || img.channels != 4) { ret 1; }
+    if (img.width != 2 || img.height != 1 || img.channels != 4)                       { ret 1; }
     if (tga_pix[0] != 10 || tga_pix[1] != 20 || tga_pix[2] != 30 || tga_pix[3] != 40) { ret 1; }
     if (tga_pix[4] != 50 || tga_pix[5] != 60 || tga_pix[6] != 70 || tga_pix[7] != 80) { ret 1; }
     ret 0;
@@ -340,11 +343,11 @@ test "tga: decode uncompressed 32-bit top-left" {
 test "tga: decode uncompressed 24-bit bottom-left flips rows" {
     var stream: [24]u8 = [24]u8{
         0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        1, 0,          # width 1
-        2, 0,          # height 2
-        24, 0x00,      # 24-bit, bottom-to-top (default origin)
-        33, 22, 11,    # storage row 0 (bottom) BGR -> RGB(11,22,33)
-        66, 55, 44     # storage row 1 (top)    BGR -> RGB(44,55,66)
+        1, 0, # width 1
+        2, 0, # height 2
+        24, 0x00, # 24-bit, bottom-to-top (default origin)
+        33, 22, 11, # storage row 0 (bottom) BGR -> RGB(11,22,33)
+        66, 55, 44 # storage row 1 (top)    BGR -> RGB(44,55,66)
     };
     val r: res[Image, DecodeError] = tga_decode(?stream[0], 24, ?tga_pix[0], 4096);
     if (!sel r.ok) { ret 1; }
@@ -359,11 +362,11 @@ test "tga: decode uncompressed 24-bit bottom-left flips rows" {
 test "tga: decode rle truecolor 32-bit" {
     var stream: [28]u8 = [28]u8{
         0, 0, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        4, 0,          # width 4
-        1, 0,          # height 1
-        32, 0x20,      # 32-bit, top-to-bottom
-        0x82, 30, 20, 10, 40,   # RLE packet: 3 x RGBA(10,20,30,40)
-        0x00, 70, 60, 50, 80    # raw packet: 1 x RGBA(50,60,70,80)
+        4, 0, # width 4
+        1, 0, # height 1
+        32, 0x20, # 32-bit, top-to-bottom
+        0x82, 30, 20, 10, 40, # RLE packet: 3 x RGBA(10,20,30,40)
+        0x00, 70, 60, 50, 80 # raw packet: 1 x RGBA(50,60,70,80)
     };
     val r: res[Image, DecodeError] = tga_decode(?stream[0], 28, ?tga_pix[0], 4096);
     if (!sel r.ok) { ret 1; }
@@ -380,18 +383,18 @@ test "tga: decode rle truecolor 32-bit" {
 
 test "tga: info rejects unsupported and truncated" {
     var color_mapped: [18]u8;
-    color_mapped[1] = 1;   # color_map_type present
-    color_mapped[2] = 1;   # color-mapped image
+    color_mapped[1]  = 1; # color_map_type present
+    color_mapped[2]  = 1; # color-mapped image
     color_mapped[12] = 1;
     color_mapped[14] = 1;
     color_mapped[16] = 8;
     if (refused(tga_info(?color_mapped[0], 18), DecodeError.unsupported{}) == 0) { ret 1; }
 
     var depth16: [18]u8;
-    depth16[2] = 2;
+    depth16[2]  = 2;
     depth16[12] = 1;
     depth16[14] = 1;
-    depth16[16] = 16;   # unsupported depth
+    depth16[16] = 16; # unsupported depth
     if (refused(tga_info(?depth16[0], 18), DecodeError.unsupported{}) == 0) { ret 2; }
 
     var short_header: [10]u8;
@@ -403,7 +406,7 @@ test "tga: decode rejects truncated pixel data" {
     var stream: [22]u8 = [22]u8{
         0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         2, 0, 1, 0, 32, 0x20,
-        30, 20, 10, 40     # only one of two pixels present
+        30, 20, 10, 40 # only one of two pixels present
     };
     if (refused(tga_decode(?stream[0], 22, ?tga_pix[0], 4096), DecodeError.truncated{}) == 0) { ret 1; }
     ret 0;
@@ -425,8 +428,8 @@ test "tga: decode right-to-left flips columns" {
     var stream: [26]u8 = [26]u8{
         0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         2, 0, 1, 0, 32, 0x30,
-        30, 20, 10, 40,    # storage col 0 (rightmost) -> RGBA(10,20,30,40)
-        70, 60, 50, 80     # storage col 1 (leftmost)  -> RGBA(50,60,70,80)
+        30, 20, 10, 40, # storage col 0 (rightmost) -> RGBA(10,20,30,40)
+        70, 60, 50, 80 # storage col 1 (leftmost)  -> RGBA(50,60,70,80)
     };
     val r: res[Image, DecodeError] = tga_decode(?stream[0], 26, ?tga_pix[0], 4096);
     if (!sel r.ok) { ret 1; }
@@ -443,24 +446,24 @@ test "tga: decode rejects short destination" {
         30, 20, 10, 40, 70, 60, 50, 80
     };
     val r: res[Image, DecodeError] = tga_decode(?stream[0], 26, ?tga_pix[0], 4);
-    if (!sel r.err) { ret 1; }
+    if (!sel r.err)              { ret 1; }
     if (!sel r.err.short_buffer) { ret 2; }
     if (r.err.short_buffer != 8) { ret 3; }
     ret 0;
 }
 
 test "tga: round-trip encode then decode" {
-    val w: u32 = 8;
-    val h: u32 = 8;
+    val w:     u32   = 8;
+    val h:     u32   = 8;
     val count: usize = w::usize * h::usize;
-    var i: usize = 0;
+    var i:     usize = 0;
     for (i < count) {
         val base: usize = i * 4;
         tga_pix[base]     = (i * 7)::u8;
         tga_pix[base + 1] = (i * 11)::u8;
         tga_pix[base + 2] = (i * 13)::u8;
         tga_pix[base + 3] = (i * 5)::u8;
-        i = i + 1;
+        i                 = i + 1;
     }
 
     var src: Image;
@@ -489,13 +492,13 @@ test "tga: round-trip encode then decode" {
 
 test "tga: encode bound refuses empty and oversized images" {
     val empty: res[usize, EncodeError] = tga_encode_bound(1, 0);
-    if (!sel empty.err) { ret 1; }
+    if (!sel empty.err)       { ret 1; }
     if (!sel empty.err.empty) { ret 2; }
     val large: res[usize, EncodeError] = tga_encode_bound(0x10000, 1);
-    if (!sel large.err) { ret 3; }
+    if (!sel large.err)           { ret 3; }
     if (!sel large.err.too_large) { ret 4; }
     val fits: res[usize, EncodeError] = tga_encode_bound(2, 2);
-    if (!sel fits.ok) { ret 5; }
+    if (!sel fits.ok)  { ret 5; }
     if (fits.ok != 34) { ret 6; }
     ret 0;
 }
