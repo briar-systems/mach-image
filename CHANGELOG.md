@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is a case detection can produce. JPEG is still not decoded.
 
 ### Changed
+- ci: CI runs the family pipeline (`briar-systems/.github` `mach-lib.yml`) on the pinned, checksum-verified mach seed: debug and release build and test, `mach fmt --check` and an all-targets release build on x86_64-linux for pull requests into dev, plus native aarch64-linux, windows and darwin legs for pull requests into main. A `gate` job is the one required check. The PNG encoder golden check runs as its verify hook.
 - build: Moved to Mach 5.0 and std 2.1. The manifest states every profile
   field, marks its defaults, and depends on `[dep.std]` pinned by the committed
   `dep/std` gitlink in place of `mach.lock`.
