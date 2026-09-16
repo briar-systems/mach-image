@@ -39,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under std's raw-memory rules instead of reported outcomes.
 
 ### Fixed
+- tools: `gen_pngsuite.py` pipes its output through `mach fmt -`, so a regenerated `src/pngsuite.mach` passes `mach fmt --check`. It needs a mach with `fmt -` (5.1.0 or later).
 - image: `VERSION` reported 0.2.0 on the 0.3.0 release.
 
 ## [0.3.0] - 2026-08-09
