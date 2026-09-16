@@ -6,18 +6,18 @@
 #
 # expectations are derived from the PNG spec and each file's documented
 # defect, never by running the decoder and recording its output: a
-# well-formed file at any spec-defined bit depth is DECODE_OK, with channels 4
+# well-formed file at any spec-defined bit depth decodes, with channels 4
 # when the color type is 4 or 6 or a tRNS chunk is present, else 3. the
 # deliberately-corrupt "x*" files are rejected
-# per their documented defect: a bad signature byte is DECODE_BAD_MAGIC, a bad
-# chunk CRC is DECODE_CORRUPT, and an undefined color type or bit depth, or a
-# missing IDAT chunk, is DECODE_BAD_HEADER. xcsn0g01's bad IDAT chunk CRC is
-# DECODE_CORRUPT and xdtn0g01's missing IDAT is DECODE_BAD_HEADER; both now
+# per their documented defect: a bad signature byte is bad_magic, a bad
+# chunk CRC is corrupt, and an undefined color type or bit depth, or a
+# missing IDAT chunk, is bad_header. xcsn0g01's bad IDAT chunk CRC is
+# corrupt and xdtn0g01's missing IDAT is bad_header; both now
 # reach their documented defect instead of stopping at the old depth gate.
 #
 # pngsuite_hashes is an FNV-1a 64 table (offset basis 14695981039346656037,
 # prime 1099511628211, folded one byte at a time -- see
-# dep/mach-std/src/crypto/hash/fnv1a.mach) over the expected RGBA8 output of
+# dep/std/src/crypto/hash/fnv1a.mach) over the expected RGBA8 output of
 # every file this decoder is expected to decode successfully. the expected
 # pixels are computed independently of this decoder, with Pillow as a
 # cross-check oracle; 16-bit samples are reduced to 8 bits by keeping the high
@@ -27,27 +27,39 @@
 # pngsuite_decodable hands the decode test below the pointer, length, and
 # dimensions for the i-th entry.
 
+use std.types.option.opt;
+use std.types.result.res;
 use std.types.size.usize;
 use image.codec.Image;
-use image.codec.DecodeStatus;
-use image.codec.DECODE_OK;
-use image.codec.DECODE_BAD_MAGIC;
-use image.codec.DECODE_BAD_HEADER;
-use image.codec.DECODE_UNSUPPORTED;
-use image.codec.DECODE_CORRUPT;
+use image.codec.DecodeError;
+use image.codec.same_case;
 use image.png.png_info;
 use image.png.png_decode;
 use image.png.png_scratch_len;
 use image.codec.image_byte_len;
 use fnv: std.crypto.hash.fnv1a;
 
-# 1 when png_info reports want, and on success the expected geometry too
-fun expect_info(data: *u8, len: usize, want: DecodeStatus, w: u32, h: u32, ch: u8) u8 {
-    var img: Image;
-    val st: DecodeStatus = png_info(data, len, ?img);
-    if (st != want) { ret 0; }
-    if (want != DECODE_OK) { ret 1; }
-    if (img.width != w || img.height != h || img.channels != ch) { ret 0; }
+# 1 when png_info accepts the file with the expected geometry
+fun expect_info(data: *u8, len: usize, w: u32, h: u32, ch: u8) u8 {
+    val r: res[Image, DecodeError] = png_info(data, len);
+    if (!sel r.ok) { ret 0; }
+    if (r.ok.width != w || r.ok.height != h || r.ok.channels != ch) { ret 0; }
+    ret 1;
+}
+
+# 1 when png_info refuses the file with the case want names
+fun expect_refusal(data: *u8, len: usize, want: DecodeError) u8 {
+    val r: res[Image, DecodeError] = png_info(data, len);
+    if (!sel r.err) { ret 0; }
+    if (!same_case[DecodeError](r.err, want)) { ret 0; }
+    ret 1;
+}
+
+# 1 when png_decode refuses the file as corrupt
+fun expect_corrupt(data: *u8, len: usize) u8 {
+    val r: res[Image, DecodeError] = png_decode(data, len, ?suite_pix[0], 262144, ?suite_scratch[0], 262144);
+    if (!sel r.err) { ret 0; }
+    if (!sel r.err.corrupt) { ret 0; }
     ret 1;
 }
 
@@ -6173,214 +6185,214 @@ var z09n2c08_png: [224]u8 = [224]u8{
 };
 
 test "pngsuite: basic formats" {
-    if (expect_info(?basn0g01_png[0], 164, DECODE_OK, 32, 32, 3) == 0) { ret 1; }
-    if (expect_info(?basn0g02_png[0], 104, DECODE_OK, 32, 32, 3) == 0) { ret 2; }
-    if (expect_info(?basn0g04_png[0], 145, DECODE_OK, 32, 32, 3) == 0) { ret 3; }
-    if (expect_info(?basn0g08_png[0], 138, DECODE_OK, 32, 32, 3) == 0) { ret 4; }
-    if (expect_info(?basn0g16_png[0], 167, DECODE_OK, 32, 32, 3) == 0) { ret 5; }
-    if (expect_info(?basn2c08_png[0], 145, DECODE_OK, 32, 32, 3) == 0) { ret 6; }
-    if (expect_info(?basn2c16_png[0], 302, DECODE_OK, 32, 32, 3) == 0) { ret 7; }
-    if (expect_info(?basn3p01_png[0], 112, DECODE_OK, 32, 32, 3) == 0) { ret 8; }
-    if (expect_info(?basn3p02_png[0], 146, DECODE_OK, 32, 32, 3) == 0) { ret 9; }
-    if (expect_info(?basn3p04_png[0], 216, DECODE_OK, 32, 32, 3) == 0) { ret 10; }
-    if (expect_info(?basn3p08_png[0], 1286, DECODE_OK, 32, 32, 3) == 0) { ret 11; }
-    if (expect_info(?basn4a08_png[0], 126, DECODE_OK, 32, 32, 4) == 0) { ret 12; }
-    if (expect_info(?basn4a16_png[0], 2206, DECODE_OK, 32, 32, 4) == 0) { ret 13; }
-    if (expect_info(?basn6a08_png[0], 184, DECODE_OK, 32, 32, 4) == 0) { ret 14; }
-    if (expect_info(?basn6a16_png[0], 3435, DECODE_OK, 32, 32, 4) == 0) { ret 15; }
+    if (expect_info(?basn0g01_png[0], 164, 32, 32, 3) == 0) { ret 1; }
+    if (expect_info(?basn0g02_png[0], 104, 32, 32, 3) == 0) { ret 2; }
+    if (expect_info(?basn0g04_png[0], 145, 32, 32, 3) == 0) { ret 3; }
+    if (expect_info(?basn0g08_png[0], 138, 32, 32, 3) == 0) { ret 4; }
+    if (expect_info(?basn0g16_png[0], 167, 32, 32, 3) == 0) { ret 5; }
+    if (expect_info(?basn2c08_png[0], 145, 32, 32, 3) == 0) { ret 6; }
+    if (expect_info(?basn2c16_png[0], 302, 32, 32, 3) == 0) { ret 7; }
+    if (expect_info(?basn3p01_png[0], 112, 32, 32, 3) == 0) { ret 8; }
+    if (expect_info(?basn3p02_png[0], 146, 32, 32, 3) == 0) { ret 9; }
+    if (expect_info(?basn3p04_png[0], 216, 32, 32, 3) == 0) { ret 10; }
+    if (expect_info(?basn3p08_png[0], 1286, 32, 32, 3) == 0) { ret 11; }
+    if (expect_info(?basn4a08_png[0], 126, 32, 32, 4) == 0) { ret 12; }
+    if (expect_info(?basn4a16_png[0], 2206, 32, 32, 4) == 0) { ret 13; }
+    if (expect_info(?basn6a08_png[0], 184, 32, 32, 4) == 0) { ret 14; }
+    if (expect_info(?basn6a16_png[0], 3435, 32, 32, 4) == 0) { ret 15; }
     ret 0;
 }
 
 test "pngsuite: interlaced formats" {
-    if (expect_info(?basi0g01_png[0], 217, DECODE_OK, 32, 32, 3) == 0) { ret 1; }
-    if (expect_info(?basi0g02_png[0], 154, DECODE_OK, 32, 32, 3) == 0) { ret 2; }
-    if (expect_info(?basi0g04_png[0], 247, DECODE_OK, 32, 32, 3) == 0) { ret 3; }
-    if (expect_info(?basi0g08_png[0], 254, DECODE_OK, 32, 32, 3) == 0) { ret 4; }
-    if (expect_info(?basi0g16_png[0], 299, DECODE_OK, 32, 32, 3) == 0) { ret 5; }
-    if (expect_info(?basi2c08_png[0], 315, DECODE_OK, 32, 32, 3) == 0) { ret 6; }
-    if (expect_info(?basi2c16_png[0], 595, DECODE_OK, 32, 32, 3) == 0) { ret 7; }
-    if (expect_info(?basi3p01_png[0], 132, DECODE_OK, 32, 32, 3) == 0) { ret 8; }
-    if (expect_info(?basi3p02_png[0], 193, DECODE_OK, 32, 32, 3) == 0) { ret 9; }
-    if (expect_info(?basi3p04_png[0], 327, DECODE_OK, 32, 32, 3) == 0) { ret 10; }
-    if (expect_info(?basi3p08_png[0], 1527, DECODE_OK, 32, 32, 3) == 0) { ret 11; }
-    if (expect_info(?basi4a08_png[0], 214, DECODE_OK, 32, 32, 4) == 0) { ret 12; }
-    if (expect_info(?basi4a16_png[0], 2855, DECODE_OK, 32, 32, 4) == 0) { ret 13; }
-    if (expect_info(?basi6a08_png[0], 361, DECODE_OK, 32, 32, 4) == 0) { ret 14; }
-    if (expect_info(?basi6a16_png[0], 4180, DECODE_OK, 32, 32, 4) == 0) { ret 15; }
+    if (expect_info(?basi0g01_png[0], 217, 32, 32, 3) == 0) { ret 1; }
+    if (expect_info(?basi0g02_png[0], 154, 32, 32, 3) == 0) { ret 2; }
+    if (expect_info(?basi0g04_png[0], 247, 32, 32, 3) == 0) { ret 3; }
+    if (expect_info(?basi0g08_png[0], 254, 32, 32, 3) == 0) { ret 4; }
+    if (expect_info(?basi0g16_png[0], 299, 32, 32, 3) == 0) { ret 5; }
+    if (expect_info(?basi2c08_png[0], 315, 32, 32, 3) == 0) { ret 6; }
+    if (expect_info(?basi2c16_png[0], 595, 32, 32, 3) == 0) { ret 7; }
+    if (expect_info(?basi3p01_png[0], 132, 32, 32, 3) == 0) { ret 8; }
+    if (expect_info(?basi3p02_png[0], 193, 32, 32, 3) == 0) { ret 9; }
+    if (expect_info(?basi3p04_png[0], 327, 32, 32, 3) == 0) { ret 10; }
+    if (expect_info(?basi3p08_png[0], 1527, 32, 32, 3) == 0) { ret 11; }
+    if (expect_info(?basi4a08_png[0], 214, 32, 32, 4) == 0) { ret 12; }
+    if (expect_info(?basi4a16_png[0], 2855, 32, 32, 4) == 0) { ret 13; }
+    if (expect_info(?basi6a08_png[0], 361, 32, 32, 4) == 0) { ret 14; }
+    if (expect_info(?basi6a16_png[0], 4180, 32, 32, 4) == 0) { ret 15; }
     ret 0;
 }
 
 test "pngsuite: scanline filters" {
-    if (expect_info(?f00n0g08_png[0], 319, DECODE_OK, 32, 32, 3) == 0) { ret 1; }
-    if (expect_info(?f00n2c08_png[0], 2475, DECODE_OK, 32, 32, 3) == 0) { ret 2; }
-    if (expect_info(?f01n0g08_png[0], 321, DECODE_OK, 32, 32, 3) == 0) { ret 3; }
-    if (expect_info(?f01n2c08_png[0], 1180, DECODE_OK, 32, 32, 3) == 0) { ret 4; }
-    if (expect_info(?f02n0g08_png[0], 355, DECODE_OK, 32, 32, 3) == 0) { ret 5; }
-    if (expect_info(?f02n2c08_png[0], 1729, DECODE_OK, 32, 32, 3) == 0) { ret 6; }
-    if (expect_info(?f03n0g08_png[0], 389, DECODE_OK, 32, 32, 3) == 0) { ret 7; }
-    if (expect_info(?f03n2c08_png[0], 1291, DECODE_OK, 32, 32, 3) == 0) { ret 8; }
-    if (expect_info(?f04n0g08_png[0], 269, DECODE_OK, 32, 32, 3) == 0) { ret 9; }
-    if (expect_info(?f04n2c08_png[0], 985, DECODE_OK, 32, 32, 3) == 0) { ret 10; }
-    if (expect_info(?f99n0g04_png[0], 426, DECODE_OK, 32, 32, 3) == 0) { ret 11; }
+    if (expect_info(?f00n0g08_png[0], 319, 32, 32, 3) == 0) { ret 1; }
+    if (expect_info(?f00n2c08_png[0], 2475, 32, 32, 3) == 0) { ret 2; }
+    if (expect_info(?f01n0g08_png[0], 321, 32, 32, 3) == 0) { ret 3; }
+    if (expect_info(?f01n2c08_png[0], 1180, 32, 32, 3) == 0) { ret 4; }
+    if (expect_info(?f02n0g08_png[0], 355, 32, 32, 3) == 0) { ret 5; }
+    if (expect_info(?f02n2c08_png[0], 1729, 32, 32, 3) == 0) { ret 6; }
+    if (expect_info(?f03n0g08_png[0], 389, 32, 32, 3) == 0) { ret 7; }
+    if (expect_info(?f03n2c08_png[0], 1291, 32, 32, 3) == 0) { ret 8; }
+    if (expect_info(?f04n0g08_png[0], 269, 32, 32, 3) == 0) { ret 9; }
+    if (expect_info(?f04n2c08_png[0], 985, 32, 32, 3) == 0) { ret 10; }
+    if (expect_info(?f99n0g04_png[0], 426, 32, 32, 3) == 0) { ret 11; }
     ret 0;
 }
 
 test "pngsuite: odd sizes" {
-    if (expect_info(?s01i3p01_png[0], 113, DECODE_OK, 1, 1, 3) == 0) { ret 1; }
-    if (expect_info(?s01n3p01_png[0], 113, DECODE_OK, 1, 1, 3) == 0) { ret 2; }
-    if (expect_info(?s02i3p01_png[0], 114, DECODE_OK, 2, 2, 3) == 0) { ret 3; }
-    if (expect_info(?s02n3p01_png[0], 115, DECODE_OK, 2, 2, 3) == 0) { ret 4; }
-    if (expect_info(?s03i3p01_png[0], 118, DECODE_OK, 3, 3, 3) == 0) { ret 5; }
-    if (expect_info(?s03n3p01_png[0], 120, DECODE_OK, 3, 3, 3) == 0) { ret 6; }
-    if (expect_info(?s04i3p01_png[0], 126, DECODE_OK, 4, 4, 3) == 0) { ret 7; }
-    if (expect_info(?s04n3p01_png[0], 121, DECODE_OK, 4, 4, 3) == 0) { ret 8; }
-    if (expect_info(?s05i3p02_png[0], 134, DECODE_OK, 5, 5, 3) == 0) { ret 9; }
-    if (expect_info(?s05n3p02_png[0], 129, DECODE_OK, 5, 5, 3) == 0) { ret 10; }
-    if (expect_info(?s06i3p02_png[0], 143, DECODE_OK, 6, 6, 3) == 0) { ret 11; }
-    if (expect_info(?s06n3p02_png[0], 131, DECODE_OK, 6, 6, 3) == 0) { ret 12; }
-    if (expect_info(?s07i3p02_png[0], 149, DECODE_OK, 7, 7, 3) == 0) { ret 13; }
-    if (expect_info(?s07n3p02_png[0], 138, DECODE_OK, 7, 7, 3) == 0) { ret 14; }
-    if (expect_info(?s08i3p02_png[0], 149, DECODE_OK, 8, 8, 3) == 0) { ret 15; }
-    if (expect_info(?s08n3p02_png[0], 139, DECODE_OK, 8, 8, 3) == 0) { ret 16; }
-    if (expect_info(?s09i3p02_png[0], 147, DECODE_OK, 9, 9, 3) == 0) { ret 17; }
-    if (expect_info(?s09n3p02_png[0], 143, DECODE_OK, 9, 9, 3) == 0) { ret 18; }
-    if (expect_info(?s32i3p04_png[0], 355, DECODE_OK, 32, 32, 3) == 0) { ret 19; }
-    if (expect_info(?s32n3p04_png[0], 263, DECODE_OK, 32, 32, 3) == 0) { ret 20; }
-    if (expect_info(?s33i3p04_png[0], 385, DECODE_OK, 33, 33, 3) == 0) { ret 21; }
-    if (expect_info(?s33n3p04_png[0], 329, DECODE_OK, 33, 33, 3) == 0) { ret 22; }
-    if (expect_info(?s34i3p04_png[0], 349, DECODE_OK, 34, 34, 3) == 0) { ret 23; }
-    if (expect_info(?s34n3p04_png[0], 248, DECODE_OK, 34, 34, 3) == 0) { ret 24; }
-    if (expect_info(?s35i3p04_png[0], 399, DECODE_OK, 35, 35, 3) == 0) { ret 25; }
-    if (expect_info(?s35n3p04_png[0], 338, DECODE_OK, 35, 35, 3) == 0) { ret 26; }
-    if (expect_info(?s36i3p04_png[0], 356, DECODE_OK, 36, 36, 3) == 0) { ret 27; }
-    if (expect_info(?s36n3p04_png[0], 258, DECODE_OK, 36, 36, 3) == 0) { ret 28; }
-    if (expect_info(?s37i3p04_png[0], 393, DECODE_OK, 37, 37, 3) == 0) { ret 29; }
-    if (expect_info(?s37n3p04_png[0], 336, DECODE_OK, 37, 37, 3) == 0) { ret 30; }
-    if (expect_info(?s38i3p04_png[0], 357, DECODE_OK, 38, 38, 3) == 0) { ret 31; }
-    if (expect_info(?s38n3p04_png[0], 245, DECODE_OK, 38, 38, 3) == 0) { ret 32; }
-    if (expect_info(?s39i3p04_png[0], 420, DECODE_OK, 39, 39, 3) == 0) { ret 33; }
-    if (expect_info(?s39n3p04_png[0], 352, DECODE_OK, 39, 39, 3) == 0) { ret 34; }
-    if (expect_info(?s40i3p04_png[0], 357, DECODE_OK, 40, 40, 3) == 0) { ret 35; }
-    if (expect_info(?s40n3p04_png[0], 256, DECODE_OK, 40, 40, 3) == 0) { ret 36; }
+    if (expect_info(?s01i3p01_png[0], 113, 1, 1, 3) == 0) { ret 1; }
+    if (expect_info(?s01n3p01_png[0], 113, 1, 1, 3) == 0) { ret 2; }
+    if (expect_info(?s02i3p01_png[0], 114, 2, 2, 3) == 0) { ret 3; }
+    if (expect_info(?s02n3p01_png[0], 115, 2, 2, 3) == 0) { ret 4; }
+    if (expect_info(?s03i3p01_png[0], 118, 3, 3, 3) == 0) { ret 5; }
+    if (expect_info(?s03n3p01_png[0], 120, 3, 3, 3) == 0) { ret 6; }
+    if (expect_info(?s04i3p01_png[0], 126, 4, 4, 3) == 0) { ret 7; }
+    if (expect_info(?s04n3p01_png[0], 121, 4, 4, 3) == 0) { ret 8; }
+    if (expect_info(?s05i3p02_png[0], 134, 5, 5, 3) == 0) { ret 9; }
+    if (expect_info(?s05n3p02_png[0], 129, 5, 5, 3) == 0) { ret 10; }
+    if (expect_info(?s06i3p02_png[0], 143, 6, 6, 3) == 0) { ret 11; }
+    if (expect_info(?s06n3p02_png[0], 131, 6, 6, 3) == 0) { ret 12; }
+    if (expect_info(?s07i3p02_png[0], 149, 7, 7, 3) == 0) { ret 13; }
+    if (expect_info(?s07n3p02_png[0], 138, 7, 7, 3) == 0) { ret 14; }
+    if (expect_info(?s08i3p02_png[0], 149, 8, 8, 3) == 0) { ret 15; }
+    if (expect_info(?s08n3p02_png[0], 139, 8, 8, 3) == 0) { ret 16; }
+    if (expect_info(?s09i3p02_png[0], 147, 9, 9, 3) == 0) { ret 17; }
+    if (expect_info(?s09n3p02_png[0], 143, 9, 9, 3) == 0) { ret 18; }
+    if (expect_info(?s32i3p04_png[0], 355, 32, 32, 3) == 0) { ret 19; }
+    if (expect_info(?s32n3p04_png[0], 263, 32, 32, 3) == 0) { ret 20; }
+    if (expect_info(?s33i3p04_png[0], 385, 33, 33, 3) == 0) { ret 21; }
+    if (expect_info(?s33n3p04_png[0], 329, 33, 33, 3) == 0) { ret 22; }
+    if (expect_info(?s34i3p04_png[0], 349, 34, 34, 3) == 0) { ret 23; }
+    if (expect_info(?s34n3p04_png[0], 248, 34, 34, 3) == 0) { ret 24; }
+    if (expect_info(?s35i3p04_png[0], 399, 35, 35, 3) == 0) { ret 25; }
+    if (expect_info(?s35n3p04_png[0], 338, 35, 35, 3) == 0) { ret 26; }
+    if (expect_info(?s36i3p04_png[0], 356, 36, 36, 3) == 0) { ret 27; }
+    if (expect_info(?s36n3p04_png[0], 258, 36, 36, 3) == 0) { ret 28; }
+    if (expect_info(?s37i3p04_png[0], 393, 37, 37, 3) == 0) { ret 29; }
+    if (expect_info(?s37n3p04_png[0], 336, 37, 37, 3) == 0) { ret 30; }
+    if (expect_info(?s38i3p04_png[0], 357, 38, 38, 3) == 0) { ret 31; }
+    if (expect_info(?s38n3p04_png[0], 245, 38, 38, 3) == 0) { ret 32; }
+    if (expect_info(?s39i3p04_png[0], 420, 39, 39, 3) == 0) { ret 33; }
+    if (expect_info(?s39n3p04_png[0], 352, 39, 39, 3) == 0) { ret 34; }
+    if (expect_info(?s40i3p04_png[0], 357, 40, 40, 3) == 0) { ret 35; }
+    if (expect_info(?s40n3p04_png[0], 256, 40, 40, 3) == 0) { ret 36; }
     ret 0;
 }
 
 test "pngsuite: transparency" {
-    if (expect_info(?tbbn0g04_png[0], 429, DECODE_OK, 32, 32, 4) == 0) { ret 1; }
-    if (expect_info(?tbbn2c16_png[0], 2041, DECODE_OK, 32, 32, 4) == 0) { ret 2; }
-    if (expect_info(?tbbn3p08_png[0], 1499, DECODE_OK, 32, 32, 4) == 0) { ret 3; }
-    if (expect_info(?tbgn2c16_png[0], 2041, DECODE_OK, 32, 32, 4) == 0) { ret 4; }
-    if (expect_info(?tbgn3p08_png[0], 1499, DECODE_OK, 32, 32, 4) == 0) { ret 5; }
-    if (expect_info(?tbrn2c08_png[0], 1633, DECODE_OK, 32, 32, 4) == 0) { ret 6; }
-    if (expect_info(?tbwn0g16_png[0], 1313, DECODE_OK, 32, 32, 4) == 0) { ret 7; }
-    if (expect_info(?tbwn3p08_png[0], 1496, DECODE_OK, 32, 32, 4) == 0) { ret 8; }
-    if (expect_info(?tbyn3p08_png[0], 1499, DECODE_OK, 32, 32, 4) == 0) { ret 9; }
-    if (expect_info(?tm3n3p02_png[0], 116, DECODE_OK, 32, 32, 4) == 0) { ret 10; }
-    if (expect_info(?tp0n0g08_png[0], 719, DECODE_OK, 32, 32, 3) == 0) { ret 11; }
-    if (expect_info(?tp0n2c08_png[0], 1594, DECODE_OK, 32, 32, 3) == 0) { ret 12; }
-    if (expect_info(?tp0n3p08_png[0], 1476, DECODE_OK, 32, 32, 3) == 0) { ret 13; }
-    if (expect_info(?tp1n3p08_png[0], 1483, DECODE_OK, 32, 32, 4) == 0) { ret 14; }
+    if (expect_info(?tbbn0g04_png[0], 429, 32, 32, 4) == 0) { ret 1; }
+    if (expect_info(?tbbn2c16_png[0], 2041, 32, 32, 4) == 0) { ret 2; }
+    if (expect_info(?tbbn3p08_png[0], 1499, 32, 32, 4) == 0) { ret 3; }
+    if (expect_info(?tbgn2c16_png[0], 2041, 32, 32, 4) == 0) { ret 4; }
+    if (expect_info(?tbgn3p08_png[0], 1499, 32, 32, 4) == 0) { ret 5; }
+    if (expect_info(?tbrn2c08_png[0], 1633, 32, 32, 4) == 0) { ret 6; }
+    if (expect_info(?tbwn0g16_png[0], 1313, 32, 32, 4) == 0) { ret 7; }
+    if (expect_info(?tbwn3p08_png[0], 1496, 32, 32, 4) == 0) { ret 8; }
+    if (expect_info(?tbyn3p08_png[0], 1499, 32, 32, 4) == 0) { ret 9; }
+    if (expect_info(?tm3n3p02_png[0], 116, 32, 32, 4) == 0) { ret 10; }
+    if (expect_info(?tp0n0g08_png[0], 719, 32, 32, 3) == 0) { ret 11; }
+    if (expect_info(?tp0n2c08_png[0], 1594, 32, 32, 3) == 0) { ret 12; }
+    if (expect_info(?tp0n3p08_png[0], 1476, 32, 32, 3) == 0) { ret 13; }
+    if (expect_info(?tp1n3p08_png[0], 1483, 32, 32, 4) == 0) { ret 14; }
     ret 0;
 }
 
 test "pngsuite: gamma" {
-    if (expect_info(?g03n0g16_png[0], 345, DECODE_OK, 32, 32, 3) == 0) { ret 1; }
-    if (expect_info(?g03n2c08_png[0], 370, DECODE_OK, 32, 32, 3) == 0) { ret 2; }
-    if (expect_info(?g03n3p04_png[0], 214, DECODE_OK, 32, 32, 3) == 0) { ret 3; }
-    if (expect_info(?g04n0g16_png[0], 363, DECODE_OK, 32, 32, 3) == 0) { ret 4; }
-    if (expect_info(?g04n2c08_png[0], 377, DECODE_OK, 32, 32, 3) == 0) { ret 5; }
-    if (expect_info(?g04n3p04_png[0], 219, DECODE_OK, 32, 32, 3) == 0) { ret 6; }
-    if (expect_info(?g05n0g16_png[0], 339, DECODE_OK, 32, 32, 3) == 0) { ret 7; }
-    if (expect_info(?g05n2c08_png[0], 350, DECODE_OK, 32, 32, 3) == 0) { ret 8; }
-    if (expect_info(?g05n3p04_png[0], 206, DECODE_OK, 32, 32, 3) == 0) { ret 9; }
-    if (expect_info(?g07n0g16_png[0], 321, DECODE_OK, 32, 32, 3) == 0) { ret 10; }
-    if (expect_info(?g07n2c08_png[0], 340, DECODE_OK, 32, 32, 3) == 0) { ret 11; }
-    if (expect_info(?g07n3p04_png[0], 207, DECODE_OK, 32, 32, 3) == 0) { ret 12; }
-    if (expect_info(?g10n0g16_png[0], 262, DECODE_OK, 32, 32, 3) == 0) { ret 13; }
-    if (expect_info(?g10n2c08_png[0], 285, DECODE_OK, 32, 32, 3) == 0) { ret 14; }
-    if (expect_info(?g10n3p04_png[0], 214, DECODE_OK, 32, 32, 3) == 0) { ret 15; }
-    if (expect_info(?g25n0g16_png[0], 383, DECODE_OK, 32, 32, 3) == 0) { ret 16; }
-    if (expect_info(?g25n2c08_png[0], 405, DECODE_OK, 32, 32, 3) == 0) { ret 17; }
-    if (expect_info(?g25n3p04_png[0], 215, DECODE_OK, 32, 32, 3) == 0) { ret 18; }
+    if (expect_info(?g03n0g16_png[0], 345, 32, 32, 3) == 0) { ret 1; }
+    if (expect_info(?g03n2c08_png[0], 370, 32, 32, 3) == 0) { ret 2; }
+    if (expect_info(?g03n3p04_png[0], 214, 32, 32, 3) == 0) { ret 3; }
+    if (expect_info(?g04n0g16_png[0], 363, 32, 32, 3) == 0) { ret 4; }
+    if (expect_info(?g04n2c08_png[0], 377, 32, 32, 3) == 0) { ret 5; }
+    if (expect_info(?g04n3p04_png[0], 219, 32, 32, 3) == 0) { ret 6; }
+    if (expect_info(?g05n0g16_png[0], 339, 32, 32, 3) == 0) { ret 7; }
+    if (expect_info(?g05n2c08_png[0], 350, 32, 32, 3) == 0) { ret 8; }
+    if (expect_info(?g05n3p04_png[0], 206, 32, 32, 3) == 0) { ret 9; }
+    if (expect_info(?g07n0g16_png[0], 321, 32, 32, 3) == 0) { ret 10; }
+    if (expect_info(?g07n2c08_png[0], 340, 32, 32, 3) == 0) { ret 11; }
+    if (expect_info(?g07n3p04_png[0], 207, 32, 32, 3) == 0) { ret 12; }
+    if (expect_info(?g10n0g16_png[0], 262, 32, 32, 3) == 0) { ret 13; }
+    if (expect_info(?g10n2c08_png[0], 285, 32, 32, 3) == 0) { ret 14; }
+    if (expect_info(?g10n3p04_png[0], 214, 32, 32, 3) == 0) { ret 15; }
+    if (expect_info(?g25n0g16_png[0], 383, 32, 32, 3) == 0) { ret 16; }
+    if (expect_info(?g25n2c08_png[0], 405, 32, 32, 3) == 0) { ret 17; }
+    if (expect_info(?g25n3p04_png[0], 215, 32, 32, 3) == 0) { ret 18; }
     ret 0;
 }
 
 test "pngsuite: chunk order and compression" {
-    if (expect_info(?oi1n0g16_png[0], 167, DECODE_OK, 32, 32, 3) == 0) { ret 1; }
-    if (expect_info(?oi1n2c16_png[0], 302, DECODE_OK, 32, 32, 3) == 0) { ret 2; }
-    if (expect_info(?oi2n0g16_png[0], 179, DECODE_OK, 32, 32, 3) == 0) { ret 3; }
-    if (expect_info(?oi2n2c16_png[0], 314, DECODE_OK, 32, 32, 3) == 0) { ret 4; }
-    if (expect_info(?oi4n0g16_png[0], 203, DECODE_OK, 32, 32, 3) == 0) { ret 5; }
-    if (expect_info(?oi4n2c16_png[0], 338, DECODE_OK, 32, 32, 3) == 0) { ret 6; }
-    if (expect_info(?oi9n0g16_png[0], 1283, DECODE_OK, 32, 32, 3) == 0) { ret 7; }
-    if (expect_info(?oi9n2c16_png[0], 3038, DECODE_OK, 32, 32, 3) == 0) { ret 8; }
-    if (expect_info(?z00n2c08_png[0], 3172, DECODE_OK, 32, 32, 3) == 0) { ret 9; }
-    if (expect_info(?z03n2c08_png[0], 232, DECODE_OK, 32, 32, 3) == 0) { ret 10; }
-    if (expect_info(?z06n2c08_png[0], 224, DECODE_OK, 32, 32, 3) == 0) { ret 11; }
-    if (expect_info(?z09n2c08_png[0], 224, DECODE_OK, 32, 32, 3) == 0) { ret 12; }
+    if (expect_info(?oi1n0g16_png[0], 167, 32, 32, 3) == 0) { ret 1; }
+    if (expect_info(?oi1n2c16_png[0], 302, 32, 32, 3) == 0) { ret 2; }
+    if (expect_info(?oi2n0g16_png[0], 179, 32, 32, 3) == 0) { ret 3; }
+    if (expect_info(?oi2n2c16_png[0], 314, 32, 32, 3) == 0) { ret 4; }
+    if (expect_info(?oi4n0g16_png[0], 203, 32, 32, 3) == 0) { ret 5; }
+    if (expect_info(?oi4n2c16_png[0], 338, 32, 32, 3) == 0) { ret 6; }
+    if (expect_info(?oi9n0g16_png[0], 1283, 32, 32, 3) == 0) { ret 7; }
+    if (expect_info(?oi9n2c16_png[0], 3038, 32, 32, 3) == 0) { ret 8; }
+    if (expect_info(?z00n2c08_png[0], 3172, 32, 32, 3) == 0) { ret 9; }
+    if (expect_info(?z03n2c08_png[0], 232, 32, 32, 3) == 0) { ret 10; }
+    if (expect_info(?z06n2c08_png[0], 224, 32, 32, 3) == 0) { ret 11; }
+    if (expect_info(?z09n2c08_png[0], 224, 32, 32, 3) == 0) { ret 12; }
     ret 0;
 }
 
 test "pngsuite: ancillary chunks" {
-    if (expect_info(?pngsuite_png[0], 2262, DECODE_OK, 256, 256, 3) == 0) { ret 1; }
-    if (expect_info(?bgai4a08_png[0], 214, DECODE_OK, 32, 32, 4) == 0) { ret 2; }
-    if (expect_info(?bgai4a16_png[0], 2855, DECODE_OK, 32, 32, 4) == 0) { ret 3; }
-    if (expect_info(?bgan6a08_png[0], 184, DECODE_OK, 32, 32, 4) == 0) { ret 4; }
-    if (expect_info(?bgan6a16_png[0], 3435, DECODE_OK, 32, 32, 4) == 0) { ret 5; }
-    if (expect_info(?bgbn4a08_png[0], 140, DECODE_OK, 32, 32, 4) == 0) { ret 6; }
-    if (expect_info(?bggn4a16_png[0], 2220, DECODE_OK, 32, 32, 4) == 0) { ret 7; }
-    if (expect_info(?bgwn6a08_png[0], 202, DECODE_OK, 32, 32, 4) == 0) { ret 8; }
-    if (expect_info(?bgyn6a16_png[0], 3453, DECODE_OK, 32, 32, 4) == 0) { ret 9; }
-    if (expect_info(?ccwn2c08_png[0], 1514, DECODE_OK, 32, 32, 3) == 0) { ret 10; }
-    if (expect_info(?ccwn3p08_png[0], 1554, DECODE_OK, 32, 32, 3) == 0) { ret 11; }
-    if (expect_info(?cdfn2c08_png[0], 404, DECODE_OK, 8, 32, 3) == 0) { ret 12; }
-    if (expect_info(?cdhn2c08_png[0], 344, DECODE_OK, 32, 8, 3) == 0) { ret 13; }
-    if (expect_info(?cdsn2c08_png[0], 232, DECODE_OK, 8, 8, 3) == 0) { ret 14; }
-    if (expect_info(?cdun2c08_png[0], 724, DECODE_OK, 32, 32, 3) == 0) { ret 15; }
-    if (expect_info(?ch1n3p04_png[0], 258, DECODE_OK, 32, 32, 3) == 0) { ret 16; }
-    if (expect_info(?ch2n3p08_png[0], 1810, DECODE_OK, 32, 32, 3) == 0) { ret 17; }
-    if (expect_info(?cm0n0g04_png[0], 292, DECODE_OK, 32, 32, 3) == 0) { ret 18; }
-    if (expect_info(?cm7n0g04_png[0], 292, DECODE_OK, 32, 32, 3) == 0) { ret 19; }
-    if (expect_info(?cm9n0g04_png[0], 292, DECODE_OK, 32, 32, 3) == 0) { ret 20; }
-    if (expect_info(?cs3n2c16_png[0], 214, DECODE_OK, 32, 32, 3) == 0) { ret 21; }
-    if (expect_info(?cs3n3p08_png[0], 259, DECODE_OK, 32, 32, 3) == 0) { ret 22; }
-    if (expect_info(?cs5n2c08_png[0], 186, DECODE_OK, 32, 32, 3) == 0) { ret 23; }
-    if (expect_info(?cs5n3p08_png[0], 271, DECODE_OK, 32, 32, 3) == 0) { ret 24; }
-    if (expect_info(?cs8n2c08_png[0], 149, DECODE_OK, 32, 32, 3) == 0) { ret 25; }
-    if (expect_info(?cs8n3p08_png[0], 256, DECODE_OK, 32, 32, 3) == 0) { ret 26; }
-    if (expect_info(?ct0n0g04_png[0], 273, DECODE_OK, 32, 32, 3) == 0) { ret 27; }
-    if (expect_info(?ct1n0g04_png[0], 792, DECODE_OK, 32, 32, 3) == 0) { ret 28; }
-    if (expect_info(?cten0g04_png[0], 742, DECODE_OK, 32, 32, 3) == 0) { ret 29; }
-    if (expect_info(?ctfn0g04_png[0], 716, DECODE_OK, 32, 32, 3) == 0) { ret 30; }
-    if (expect_info(?ctgn0g04_png[0], 1182, DECODE_OK, 32, 32, 3) == 0) { ret 31; }
-    if (expect_info(?cthn0g04_png[0], 1269, DECODE_OK, 32, 32, 3) == 0) { ret 32; }
-    if (expect_info(?ctjn0g04_png[0], 941, DECODE_OK, 32, 32, 3) == 0) { ret 33; }
-    if (expect_info(?ctzn0g04_png[0], 753, DECODE_OK, 32, 32, 3) == 0) { ret 34; }
-    if (expect_info(?exif2c08_png[0], 1788, DECODE_OK, 32, 32, 3) == 0) { ret 35; }
-    if (expect_info(?pp0n2c16_png[0], 962, DECODE_OK, 32, 32, 3) == 0) { ret 36; }
-    if (expect_info(?pp0n6a08_png[0], 818, DECODE_OK, 32, 32, 4) == 0) { ret 37; }
-    if (expect_info(?ps1n0g08_png[0], 1456, DECODE_OK, 32, 32, 3) == 0) { ret 38; }
-    if (expect_info(?ps1n2c16_png[0], 1620, DECODE_OK, 32, 32, 3) == 0) { ret 39; }
-    if (expect_info(?ps2n0g08_png[0], 2320, DECODE_OK, 32, 32, 3) == 0) { ret 40; }
-    if (expect_info(?ps2n2c16_png[0], 2484, DECODE_OK, 32, 32, 3) == 0) { ret 41; }
+    if (expect_info(?pngsuite_png[0], 2262, 256, 256, 3) == 0) { ret 1; }
+    if (expect_info(?bgai4a08_png[0], 214, 32, 32, 4) == 0) { ret 2; }
+    if (expect_info(?bgai4a16_png[0], 2855, 32, 32, 4) == 0) { ret 3; }
+    if (expect_info(?bgan6a08_png[0], 184, 32, 32, 4) == 0) { ret 4; }
+    if (expect_info(?bgan6a16_png[0], 3435, 32, 32, 4) == 0) { ret 5; }
+    if (expect_info(?bgbn4a08_png[0], 140, 32, 32, 4) == 0) { ret 6; }
+    if (expect_info(?bggn4a16_png[0], 2220, 32, 32, 4) == 0) { ret 7; }
+    if (expect_info(?bgwn6a08_png[0], 202, 32, 32, 4) == 0) { ret 8; }
+    if (expect_info(?bgyn6a16_png[0], 3453, 32, 32, 4) == 0) { ret 9; }
+    if (expect_info(?ccwn2c08_png[0], 1514, 32, 32, 3) == 0) { ret 10; }
+    if (expect_info(?ccwn3p08_png[0], 1554, 32, 32, 3) == 0) { ret 11; }
+    if (expect_info(?cdfn2c08_png[0], 404, 8, 32, 3) == 0) { ret 12; }
+    if (expect_info(?cdhn2c08_png[0], 344, 32, 8, 3) == 0) { ret 13; }
+    if (expect_info(?cdsn2c08_png[0], 232, 8, 8, 3) == 0) { ret 14; }
+    if (expect_info(?cdun2c08_png[0], 724, 32, 32, 3) == 0) { ret 15; }
+    if (expect_info(?ch1n3p04_png[0], 258, 32, 32, 3) == 0) { ret 16; }
+    if (expect_info(?ch2n3p08_png[0], 1810, 32, 32, 3) == 0) { ret 17; }
+    if (expect_info(?cm0n0g04_png[0], 292, 32, 32, 3) == 0) { ret 18; }
+    if (expect_info(?cm7n0g04_png[0], 292, 32, 32, 3) == 0) { ret 19; }
+    if (expect_info(?cm9n0g04_png[0], 292, 32, 32, 3) == 0) { ret 20; }
+    if (expect_info(?cs3n2c16_png[0], 214, 32, 32, 3) == 0) { ret 21; }
+    if (expect_info(?cs3n3p08_png[0], 259, 32, 32, 3) == 0) { ret 22; }
+    if (expect_info(?cs5n2c08_png[0], 186, 32, 32, 3) == 0) { ret 23; }
+    if (expect_info(?cs5n3p08_png[0], 271, 32, 32, 3) == 0) { ret 24; }
+    if (expect_info(?cs8n2c08_png[0], 149, 32, 32, 3) == 0) { ret 25; }
+    if (expect_info(?cs8n3p08_png[0], 256, 32, 32, 3) == 0) { ret 26; }
+    if (expect_info(?ct0n0g04_png[0], 273, 32, 32, 3) == 0) { ret 27; }
+    if (expect_info(?ct1n0g04_png[0], 792, 32, 32, 3) == 0) { ret 28; }
+    if (expect_info(?cten0g04_png[0], 742, 32, 32, 3) == 0) { ret 29; }
+    if (expect_info(?ctfn0g04_png[0], 716, 32, 32, 3) == 0) { ret 30; }
+    if (expect_info(?ctgn0g04_png[0], 1182, 32, 32, 3) == 0) { ret 31; }
+    if (expect_info(?cthn0g04_png[0], 1269, 32, 32, 3) == 0) { ret 32; }
+    if (expect_info(?ctjn0g04_png[0], 941, 32, 32, 3) == 0) { ret 33; }
+    if (expect_info(?ctzn0g04_png[0], 753, 32, 32, 3) == 0) { ret 34; }
+    if (expect_info(?exif2c08_png[0], 1788, 32, 32, 3) == 0) { ret 35; }
+    if (expect_info(?pp0n2c16_png[0], 962, 32, 32, 3) == 0) { ret 36; }
+    if (expect_info(?pp0n6a08_png[0], 818, 32, 32, 4) == 0) { ret 37; }
+    if (expect_info(?ps1n0g08_png[0], 1456, 32, 32, 3) == 0) { ret 38; }
+    if (expect_info(?ps1n2c16_png[0], 1620, 32, 32, 3) == 0) { ret 39; }
+    if (expect_info(?ps2n0g08_png[0], 2320, 32, 32, 3) == 0) { ret 40; }
+    if (expect_info(?ps2n2c16_png[0], 2484, 32, 32, 3) == 0) { ret 41; }
     ret 0;
 }
 
 test "pngsuite: corrupt files" {
-    if (expect_info(?xc1n0g08_png[0], 138, DECODE_BAD_HEADER, 0, 0, 0) == 0) { ret 1; }
-    if (expect_info(?xc9n2c08_png[0], 145, DECODE_BAD_HEADER, 0, 0, 0) == 0) { ret 2; }
-    if (expect_info(?xcrn0g04_png[0], 145, DECODE_BAD_MAGIC, 0, 0, 0) == 0) { ret 3; }
-    if (expect_info(?xcsn0g01_png[0], 164, DECODE_CORRUPT, 0, 0, 0) == 0) { ret 4; }
-    if (expect_info(?xd0n2c08_png[0], 145, DECODE_BAD_HEADER, 0, 0, 0) == 0) { ret 5; }
-    if (expect_info(?xd3n2c08_png[0], 145, DECODE_BAD_HEADER, 0, 0, 0) == 0) { ret 6; }
-    if (expect_info(?xd9n2c08_png[0], 145, DECODE_BAD_HEADER, 0, 0, 0) == 0) { ret 7; }
-    if (expect_info(?xdtn0g01_png[0], 61, DECODE_BAD_HEADER, 0, 0, 0) == 0) { ret 8; }
-    if (expect_info(?xhdn0g08_png[0], 138, DECODE_CORRUPT, 0, 0, 0) == 0) { ret 9; }
-    if (expect_info(?xlfn0g04_png[0], 145, DECODE_BAD_MAGIC, 0, 0, 0) == 0) { ret 10; }
-    if (expect_info(?xs1n0g01_png[0], 164, DECODE_BAD_MAGIC, 0, 0, 0) == 0) { ret 11; }
-    if (expect_info(?xs2n0g01_png[0], 164, DECODE_BAD_MAGIC, 0, 0, 0) == 0) { ret 12; }
-    if (expect_info(?xs4n0g01_png[0], 164, DECODE_BAD_MAGIC, 0, 0, 0) == 0) { ret 13; }
-    if (expect_info(?xs7n0g01_png[0], 164, DECODE_BAD_MAGIC, 0, 0, 0) == 0) { ret 14; }
+    if (expect_refusal(?xc1n0g08_png[0], 138, DecodeError.bad_header{}) == 0) { ret 1; }
+    if (expect_refusal(?xc9n2c08_png[0], 145, DecodeError.bad_header{}) == 0) { ret 2; }
+    if (expect_refusal(?xcrn0g04_png[0], 145, DecodeError.bad_magic{}) == 0) { ret 3; }
+    if (expect_refusal(?xcsn0g01_png[0], 164, DecodeError.corrupt{}) == 0) { ret 4; }
+    if (expect_refusal(?xd0n2c08_png[0], 145, DecodeError.bad_header{}) == 0) { ret 5; }
+    if (expect_refusal(?xd3n2c08_png[0], 145, DecodeError.bad_header{}) == 0) { ret 6; }
+    if (expect_refusal(?xd9n2c08_png[0], 145, DecodeError.bad_header{}) == 0) { ret 7; }
+    if (expect_refusal(?xdtn0g01_png[0], 61, DecodeError.bad_header{}) == 0) { ret 8; }
+    if (expect_refusal(?xhdn0g08_png[0], 138, DecodeError.corrupt{}) == 0) { ret 9; }
+    if (expect_refusal(?xlfn0g04_png[0], 145, DecodeError.bad_magic{}) == 0) { ret 10; }
+    if (expect_refusal(?xs1n0g01_png[0], 164, DecodeError.bad_magic{}) == 0) { ret 11; }
+    if (expect_refusal(?xs2n0g01_png[0], 164, DecodeError.bad_magic{}) == 0) { ret 12; }
+    if (expect_refusal(?xs4n0g01_png[0], 164, DecodeError.bad_magic{}) == 0) { ret 13; }
+    if (expect_refusal(?xs7n0g01_png[0], 164, DecodeError.bad_magic{}) == 0) { ret 14; }
     ret 0;
 }
 
@@ -6621,19 +6633,19 @@ test "pngsuite: every supported image decodes to its expected pixels" {
         val data: *u8 = pngsuite_decodable(i, ?len, ?w, ?h);
         if (data == nil) { ret (i + 1)::i32; }
 
-        val scratch_need: usize = png_scratch_len(data, len);
-        if (scratch_need == 0 || scratch_need > 262144) { ret (i + 1)::i32; }
+        val scratch_need: res[usize, DecodeError] = png_scratch_len(data, len);
+        if (!sel scratch_need.ok)       { ret (i + 1)::i32; }
+        if (scratch_need.ok > 262144)   { ret (i + 1)::i32; }
 
-        var img: Image;
-        if (png_decode(data, len, ?suite_pix[0], 262144, ?suite_scratch[0], 262144, ?img) != DECODE_OK) {
-            ret (i + 1)::i32;
-        }
-        if (img.width != w || img.height != h) { ret (i + 1)::i32; }
+        val r: res[Image, DecodeError] = png_decode(data, len, ?suite_pix[0], 262144, ?suite_scratch[0], 262144);
+        if (!sel r.ok) { ret (i + 1)::i32; }
+        if (r.ok.width != w || r.ok.height != h) { ret (i + 1)::i32; }
 
         var hash: u64 = fnv.FNV_INIT;
         var b:    usize = 0;
-        val need: usize = image_byte_len(w, h);
-        for (b < need) {
+        val need: opt[usize] = image_byte_len(w, h);
+        if (!sel need.some) { ret (i + 1)::i32; }
+        for (b < need.some) {
             hash = fnv.step_u8(hash, suite_pix[b]);
             b = b + 1;
         }

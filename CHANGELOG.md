@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- format: `detect` recognizes the JPEG start-of-image marker, so `Format.jpeg`
+  is a case detection can produce. JPEG is still not decoded.
+
+### Changed
+- build: Moved to Mach 5.0 and std 2.1. The manifest states every profile
+  field, marks its defaults, and depends on `[dep.std]` pinned by the committed
+  `dep/std` gitlink in place of `mach.lock`.
+- codec: `DecodeStatus` and the `DECODE_*` codes are replaced by the
+  `DecodeError` tag (`truncated`, `bad_magic`, `bad_header`,
+  `short_buffer: usize`, `short_scratch: usize`, `unsupported`, `corrupt`).
+  The buffer cases carry the bytes required. `decode_status_name` is now
+  `decode_error_name`.
+- codec: Encoders report the new `EncodeError` tag (`empty`, `too_large`,
+  `channels`, `colorspace`, `short_buffer: usize`) with `encode_error_name`.
+- codec: `image_byte_len(w, h) usize` returning 0 is now `opt[usize]`.
+- format: The `FORMAT_*` constants are replaced by the `Format` tag.
+  `format_name` takes a `Format`, and `detect` returns `opt[Format]`.
+- qoi, tga, png: `*_info(src, len, out) DecodeStatus` is now
+  `*_info(src, len) res[Image, DecodeError]`, and
+  `*_decode(src, len, dst, dst_len, out) DecodeStatus` is now
+  `*_decode(src, len, dst, dst_len) res[Image, DecodeError]`. `png_decode`
+  keeps its scratch pair before the dropped `out`.
+- qoi, tga, png: `png_scratch_len` returns `res[usize, DecodeError]`,
+  `*_encode_bound` returns `res[usize, EncodeError]`, and `*_encode` returns
+  `res[usize, EncodeError]` in place of a 0 sentinel.
+- qoi, tga, png: Nil buffer and image arguments are caller contract violations
+  under std's raw-memory rules instead of reported outcomes.
+
+### Fixed
+- image: `VERSION` reported 0.2.0 on the 0.3.0 release.
+
 ## [0.3.0] - 2026-08-09
 
 ### Added

@@ -27,7 +27,7 @@ jobs:
           mach info
 
       - name: Sync dependencies
-        run: mach dep pull
+        run: mach dep pull .
 
       - name: Verify PNG encoder golden
         run: python3 tools/verify_png_encoder.py
