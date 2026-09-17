@@ -9,7 +9,8 @@ Usage: gen_pngsuite.py <corpus-dir> [-o src/pngsuite.mach]
 For every file, this script independently re-derives (from the PNG spec and,
 for the deliberately-corrupt "x*" files, their documented defect) the
 DecodeError case png_info should report -- it does not run the mach decoder and
-copy its output. It never calls the mach toolchain.
+copy its output. The only mach toolchain call is `mach fmt -` ($MACH_COMPILER,
+else mach on PATH), which owns the layout of the emitted source.
 
 For files expected to decode successfully, the script also decodes the
 expected RGBA8 pixels itself (zlib for inflate, a hand-written unfilter /
@@ -24,6 +25,7 @@ bKGD background is composited, so alpha is preserved as decoded.
 import argparse
 import os
 import struct
+import subprocess
 import sys
 import zlib
 
@@ -704,13 +706,26 @@ test "pngsuite: every supported image decodes to its expected pixels" {
 '''
 
 
+def canonical(text: str) -> str:
+    # the formatter owns layout, so regenerated and committed sources agree with mach fmt --check
+    compiler = os.environ.get("MACH_COMPILER", "mach")
+    try:
+        done = subprocess.run([compiler, "fmt", "-"], input=text, capture_output=True, text=True)
+    except FileNotFoundError:
+        sys.exit("mach compiler %r not found, set MACH_COMPILER" % compiler)
+    if done.returncode != 0:
+        sys.stderr.write(done.stderr)
+        sys.exit("mach fmt rejected generated source")
+    return done.stdout
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("corpus_dir", help="directory of PngSuite *.png files")
     parser.add_argument("-o", "--out", default="src/pngsuite.mach", help="output .mach path")
     args = parser.parse_args()
 
-    text = build(args.corpus_dir)
+    text = canonical(build(args.corpus_dir))
     with open(args.out, "w") as f:
         f.write(text)
     print("wrote %s (%d bytes)" % (args.out, len(text)), file=sys.stderr)

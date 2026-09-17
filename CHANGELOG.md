@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-16
+
+### Changed
+- build: std moves to 4.0.0 (`tag/v4.0.0`), which needs mach 5.2.0 or later. No source changes were needed, since the codecs use none of the OS, io or table surface std 4 reworked.
+
+### Fixed
+- tools: `gen_pngsuite.py` pipes its output through `mach fmt -`, so a regenerated `src/pngsuite.mach` passes `mach fmt --check`. It needs a mach with `fmt -` (5.1.0 or later).
+
 ## [0.4.0] - 2026-09-16
 
 ### Added
