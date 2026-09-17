@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- build: std moves to 4.0.0 (`tag/v4.0.0`), which needs mach 5.2.0 or later. No source changes were needed, since the codecs use none of the OS, io or table surface std 4 reworked.
+
 ## [0.4.0] - 2026-09-16
 
 ### Added
