@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- ci: Releases run through the family workflow (`briar-systems/.github` `mach-release.yml`). Pushing a `v*` tag checks it against the manifest version and changelog, runs every CI leg, and publishes the GitHub release with the changelog section as notes.
+
 ## [0.4.1] - 2026-09-16
 
 ### Changed
