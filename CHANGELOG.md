@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- ci: Release runs are serialized per tag, so a tag push GitHub delivers twice cannot publish twice.
 - manifest: `[project]` declares the compiler range `mach = "^5.3"`, so mach 5.3 and later stop warning about a missing range. Building now needs mach 5.3 or later.
 - license: Copyright is attributed to Briar Systems LLC.
 - ci: Releases run through the family workflow (`briar-systems/.github` `mach-release.yml`). Pushing a `v*` tag checks it against the manifest version and changelog, runs every CI leg, and publishes the GitHub release with the changelog section as notes.
