@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- build: std moves to 6.0.0, declared as `version = "^6.0"` with the committed `dep/std` gitlink (980386e) as the pin. std 6 gives the collections one ordering contract and reshapes `sort`, `heap`, `map`, `set`, `ct` and `buffers.open_account`; mach-image uses none of those, so no source changed. A std major moves every consumer's resolution, so this ships as a minor.
+- manifest: `[project]` declares `mach = "^5.9"`, the family compiler seed. Building now needs mach 5.9.0 or later.
+
 ## [0.5.0] - 2026-09-19
 
 ### Changed
