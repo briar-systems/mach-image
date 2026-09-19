@@ -1,6 +1,7 @@
 [project]
 id      = "image"
-version = "0.4.1"
+version = "0.5.0"
+mach    = "^5.5.2"
 src     = "src"
 out     = "out/{target.name}/{profile.name}"
 
@@ -56,4 +57,4 @@ default = true
 
 [dep.std]
 git = "https://github.com/briar-systems/mach-std"
-ref = "tag/v4.0.0"
+version = "^5.7.1"
