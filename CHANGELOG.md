@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-19
+
 ### Changed
 - build: std moves to 5.7.1 (`tag/v5.7.1`). A root project pinning std 5.x overrides every dependency's std, so staying on std 4 broke under such a root. No source change was needed: the codecs use only `std.types`, `std.memory.raw_*`, `std.allocator`, `std.compress`, `std.crypto.hash` and `std.runtime`, none of which std 5 reshaped.
 - manifest: `[project]` declares the compiler range `mach = "^5.5.2"`, so mach 5.3 and later stop warning about a missing range. `^5.5.2` is the floor std 5.7.1 itself requires, and mach 5.5.1 refuses the dependency closure. Building now needs mach 5.5.2 or later.
