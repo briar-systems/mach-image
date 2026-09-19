@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- build: std moves to 5.7.1 (`tag/v5.7.1`). A root project pinning std 5.x overrides every dependency's std, so staying on std 4 broke under such a root. No source change was needed: the codecs use only `std.types`, `std.memory.raw_*`, `std.allocator`, `std.compress`, `std.crypto.hash` and `std.runtime`, none of which std 5 reshaped.
+- manifest: `[project].mach` is `^5.5.2`, the floor std 5.7.1 itself requires. mach 5.5.1 refuses the dependency closure.
 - ci: Release runs are serialized per tag, so a tag push GitHub delivers twice cannot publish twice.
 - manifest: `[project]` declares the compiler range `mach = "^5.3"`, so mach 5.3 and later stop warning about a missing range. Building now needs mach 5.3 or later.
 - license: Copyright is attributed to Briar Systems LLC.
