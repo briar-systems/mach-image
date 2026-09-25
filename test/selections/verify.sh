@@ -36,7 +36,7 @@ for target in $targets; do
         "$(wc -l < "$scratch/$target-image.txt")" "$(wc -l < "$scratch/$target-tests.txt")" \
         "$(comm -12 "$scratch/declared.txt" "$scratch/$target-union.txt" | wc -l)" "$(wc -l < "$scratch/declared.txt")"
     if [ -n "$dropped" ]; then
-        echo "::error::$target runs no selection that collects these tests; reach their modules from src/test/tests.mach:"
+        echo "::error::$target runs no selection that collects these tests; reach their modules from src/lib/tests.mach:"
         while IFS= read -r location; do printf '  %s\n' "$location"; done <<< "$dropped"
         missing=1
     fi
