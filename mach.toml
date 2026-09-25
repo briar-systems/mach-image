@@ -1,6 +1,6 @@
 [project]
 id      = "image"
-version = "0.7.0"
+version = "0.7.1"
 mach    = "^5.12"
 src     = "src"
 out     = "out/{target.name}/{profile.name}"
@@ -49,7 +49,7 @@ float_reassoc = false
 # the library, and the only artifact `mach build .` and `--all-targets` select
 [artifact.image]
 kind    = "static"
-entry   = "image.mach"
+entry   = "lib/image.mach"
 out     = "lib/image"
 targets = ["*"]
 link    = []
@@ -59,7 +59,7 @@ default = true
 # test-only: reaches the modules whose tests the library does not, for `mach test . --lib tests`
 [artifact.tests]
 kind    = "static"
-entry   = "test/tests.mach"
+entry   = "lib/tests.mach"
 out     = "lib/tests"
 targets = ["*"]
 link    = []

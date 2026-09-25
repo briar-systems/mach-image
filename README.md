@@ -79,13 +79,15 @@ other targets need only a corresponding `[target.*]` entry.
 
 ```
 src/
-  image.mach    library surface: flat public namespace (VERSION, formats, codecs)
-  format.mach   the Format tag, format_name, and best-effort detect
-  codec.mach    the shared Image type, colorspace hints, sizing, and error tags
-  qoi.mach      QOI decoder and encoder
-  tga.mach      TGA truecolor decoder (types 2 and 10) and a minimal encoder
-  png.mach      PNG decoder and deterministic allocation-free RGBA8 encoder
-  pngsuite.mach the embedded PngSuite corpus and the tests that run it
+  lib/
+    image.mach    the image artifact's entry: flat public namespace (VERSION, formats, codecs)
+    tests.mach    the test-only tests artifact's entry, reaching pngsuite.mach
+  format.mach     the Format tag, format_name, and best-effort detect
+  codec.mach      the shared Image type, colorspace hints, sizing, and error tags
+  qoi.mach        QOI decoder and encoder
+  tga.mach        TGA truecolor decoder (types 2 and 10) and a minimal encoder
+  png.mach        PNG decoder and deterministic allocation-free RGBA8 encoder
+  pngsuite.mach   the embedded PngSuite corpus and the tests that run it
 ```
 
 `codec.mach` defines the library's common currency: an `Image` is an RGBA8
@@ -98,7 +100,7 @@ and rejected cleanly, never trusted.
 
 Each codec lands as its own module (`qoi.mach`, `tga.mach`, ...) exposing its
 decode/encode entry points and buffer-sizing helpers, re-exported through
-`image.mach` so a bare `use image;` reaches the whole API under one namespace.
+`lib/image.mach` so a bare `use image;` reaches the whole API under one namespace.
 
 The PNG writer sizes caller-owned storage with
 `png_encode_bound(width, height)` and writes with
