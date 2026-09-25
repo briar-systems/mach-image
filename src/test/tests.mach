@@ -1,0 +1,6 @@
+# the modules whose tests the image artifact does not reach
+# `mach test . --lib tests` runs them
+
+use std.runtime;
+
+use image.pngsuite;
