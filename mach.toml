@@ -1,7 +1,7 @@
 [project]
 id      = "image"
-version = "0.6.0"
-mach    = "^5.9"
+version = "0.7.0"
+mach    = "^5.12"
 src     = "src"
 out     = "out/{target.name}/{profile.name}"
 
@@ -46,6 +46,7 @@ simd = "scalarize"
 vectorize = false
 float_reassoc = false
 
+# the library, and the only artifact `mach build .` and `--all-targets` select
 [artifact.image]
 kind    = "static"
 entry   = "image.mach"
@@ -55,6 +56,15 @@ link    = []
 need    = []
 default = true
 
+# test-only: reaches the modules whose tests the library does not, for `mach test . --lib tests`
+[artifact.tests]
+kind    = "static"
+entry   = "test/tests.mach"
+out     = "lib/tests"
+targets = ["*"]
+link    = []
+need    = []
+
 [dep.std]
 git = "https://github.com/briar-systems/mach-std"
-version = "^6.0"
+version = "^8.0"
