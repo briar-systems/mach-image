@@ -112,8 +112,11 @@ has no ancillary color-management chunks, and pixel bytes are never converted.
 ## Tests
 
 `test` blocks are self-contained and display-free: codec round-trips and
-decode/encode against known-good fixtures, run by `mach test .`. The PNG
+decode/encode against known-good fixtures. `mach test .` runs the tests the
+library reaches, and `mach test . --lib tests` runs the PngSuite corpus in
+`src/pngsuite.mach`, which the library does not reach. The PNG
 encoder's deterministic golden is also parsed and decompressed by Python's
 maintained zlib through `tools/verify_png_encoder.py`, so encoder correctness is
-not established solely by mach-image's decoder. CI fetches the latest released
-Mach compiler and runs both checks on every pull request.
+not established solely by mach-image's decoder. CI runs all three on every pull
+request, and `test/selections/verify.sh` fails if a declared test is collected
+by neither `mach test` run.
