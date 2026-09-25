@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-09-25
+
 ### Changed
 - chore: artifact entries move under `src/lib/` (#54), as across the family (briar-systems/.github#107). The library entry moves from `src/image.mach` to `src/lib/image.mach` and the test-only `tests` entry from `src/test/tests.mach` to `src/lib/tests.mach`. The entry's full module path is now `image.lib.image` where it was `image.image`. A bare `use image;` binds it as before, and every other module path (`image.png`, `image.format`, `image.codec`, ...) is unchanged. `mach test . --list` and `mach test . --lib tests --list` collect the same tests as before.
 
