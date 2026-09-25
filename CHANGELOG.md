@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Breaking: builds against std 8.0.0 and requires mach 5.12** (#50). `[dep.std]` moves from `^6.0` to `^8.0`, realized to v8.0.0 by the committed `dep/std` gitlink, and `[project].mach` rises from `^5.9` to `^5.12`, which std 8 requires. Resolution is flat, so a consumer of mach-image must move to std 8 and mach 5.12 with it, and must rebuild anything that links std rather than only recompiling against the new sources. No source change was needed: nothing here calls `io.runtime.make`, reads `data.toml.Value` or uses `buffers.SecretSource`, the surfaces std 7 and 8 changed, and the only allocator it builds is `allocator.fixed`, which std 7's `align` change did not touch.
+- test: the PngSuite corpus tests run under `mach test . --lib tests` (#50). mach 5.12 tests only the selected artifact's closure (briar-systems/mach#3813), and nothing the library exports reaches `src/pngsuite.mach`, so `mach test .` alone dropped its 10 tests. The test-only `[artifact.tests]` (entry `src/test/tests.mach`) reaches it, and `[artifact.image]` stays the default, so `mach build .` and `--all-targets` still build the library alone. `test/selections/verify.sh`, run by the CI verify hook, fails when a test declared under `src` is collected by neither run on any target.
+- ci: the lib job seeds mach v5.12.0 until the family pin moves (briar-systems/.github#103), and runs the `--lib tests` selection in every profile (#50).
+
 ## [0.6.0] - 2026-09-19
 
 ### Changed
