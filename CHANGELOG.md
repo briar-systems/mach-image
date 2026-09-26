@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-26
+
+### Changed
+- **Breaking: builds against std 9.0.0 and requires mach 6** (#58). `[dep.std]` moves from `^8.0` to `^9.0`, realized to v9.0.0 by the committed `dep/std` gitlink, and `[project].mach` rises from `^5.12` to `^6`, which std 9 requires. Resolution is flat, so a consumer of mach-image must move to std 9 and mach 6 with it.
+- api: `codec.same_case` is `#[testing]`, since only tests use it, and `pngsuite_decodable` and `PNGSUITE_DECODABLE_COUNT` are no longer `pub` (#58). None of them is forwarded from the entry.
+- test: tests are named with identifiers (`test subject__case`), as mach 6 requires, and pruned to the mach 6 test policy, from 79 to 39 (#58). Raster, signature, CRC and header checks the PngSuite corpus already covers are dropped, the per-category PngSuite geometry tests fold into the decode test, which now also checks each file's channel count, and related refusals fold into one test per subject. `tools/gen_pngsuite.py` changes to match and `src/pngsuite.mach` is regenerated.
+- ci: the lib job seeds mach v6.0.0 until the family pin moves (briar-systems/.github#103), and `test/selections/verify.sh` matches declared tests to `mach test --list` by qualified name, which is what mach 6 lists (#58).
+
 ## [0.7.1] - 2026-09-25
 
 ### Changed
