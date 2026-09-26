@@ -23,9 +23,9 @@ jobs:
     uses: briar-systems/.github/.github/workflows/mach-lib.yml@main
     with:
       heavy: ${{ inputs.heavy }}
-      # std 8 needs mach 5.12, so this seeds v5.12.0 until the family pin moves (briar-systems/.github#103)
-      mach-version: v5.12.0
-      # mach 5.12 tests one artifact's closure, and src/pngsuite.mach is reached only by the tests artifact
+      # std 9 needs mach 6, so this seeds v6.0.0 until the family pin moves
+      mach-version: v6.0.0
+      # mach tests one artifact's closure, and src/pngsuite.mach is reached only by the tests artifact
       test-selections: '[["--lib", "tests"]]'
 
   gate:
