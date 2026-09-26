@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # every test declared under src runs under some `mach test` selection, on every target
 #
-# mach 5.12 tests one artifact's closure (mach#3813), so a module no artifact
+# mach tests one artifact's closure (mach#3813), so a module no artifact
 # reaches has its tests dropped without a word. this fails on any declared test
 # that neither `mach test .` nor `mach test . --lib tests` collects.
 set -euo pipefail
@@ -14,7 +14,12 @@ trap 'rm -rf -- "$scratch"' EXIT
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
 cd "$root"
-grep -rnE --include='*.mach' '^[[:space:]]*test "' src | cut -d: -f1,2 | sort -u > "$scratch/declared.txt"
+# a test's qualified name is its module path, `#`, and its name: src/png.mach's
+# `test foo` is image.png#foo
+project="$(sed -n 's/^id *= *"\(.*\)"$/\1/p' mach.toml)"
+grep -rE --include='*.mach' '^[[:space:]]*test [A-Za-z_]' src \
+    | sed -E "s|^src/(.*)\.mach:[[:space:]]*test ([A-Za-z_][A-Za-z0-9_]*).*|$project.\1#\2|; s|/|.|g" \
+    | sort -u > "$scratch/declared.txt"
 [ -s "$scratch/declared.txt" ] || fail "found no test declarations under src"
 
 targets="$(sed -n 's/^\[target\.\([^]]*\)\]$/\1/p' mach.toml)"
@@ -30,7 +35,7 @@ missing=0
 for target in $targets; do
     list "$scratch/$target-image.txt" --target "$target"
     list "$scratch/$target-tests.txt" --lib tests --target "$target"
-    cat "$scratch/$target-image.txt" "$scratch/$target-tests.txt" | awk '{print $NF}' | sort -u > "$scratch/$target-union.txt"
+    cat "$scratch/$target-image.txt" "$scratch/$target-tests.txt" | awk '{print $1}' | sort -u > "$scratch/$target-union.txt"
     dropped="$(comm -23 "$scratch/declared.txt" "$scratch/$target-union.txt")"
     printf '%s: image %d, tests %d, both %d of %d declared\n' "$target" \
         "$(wc -l < "$scratch/$target-image.txt")" "$(wc -l < "$scratch/$target-tests.txt")" \

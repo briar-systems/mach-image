@@ -329,18 +329,22 @@ pub fun qoi_encode(img: *Image, dst: *u8, dst_len: usize) res[usize, EncodeError
     ret res[usize, EncodeError].ok{p};
 }
 
+#[testing]
 var qoi_buf: [4096]u8;
+#[testing]
 var pix_buf: [4096]u8;
-var rt_buf:  [4096]u8;
+#[testing]
+var rt_buf: [4096]u8;
 
 # whether a decode was refused with the case want names
+#[testing]
 fun refused(r: res[Image, DecodeError], want: DecodeError) u8 {
     if (!sel r.err)                           { ret 0; }
     if (!same_case[DecodeError](r.err, want)) { ret 0; }
     ret 1;
 }
 
-test "qoi: decode single rgba pixel" {
+test qoi_decode__rgba_chunk {
     var stream: [22]u8 = [22]u8{
         'q', 'o', 'i', 'f',
         0, 0, 0, 1,
@@ -357,7 +361,7 @@ test "qoi: decode single rgba pixel" {
     ret 0;
 }
 
-test "qoi: decode run of default pixel" {
+test qoi_decode__run_of_initial_pixel {
     # header for a 1x4 image, then a RUN chunk of length 4 over (0,0,0,255).
     var stream: [23]u8 = [23]u8{
         'q', 'o', 'i', 'f',
@@ -379,7 +383,7 @@ test "qoi: decode run of default pixel" {
     ret 0;
 }
 
-test "qoi: info rejects bad input" {
+test qoi_info__refusals {
     var short: [4]u8 = [4]u8{'q', 'o', 'i', 'f'};
     if (refused(qoi_info(?short[0], 4), DecodeError.truncated{}) == 0) { ret 1; }
 
@@ -394,7 +398,7 @@ test "qoi: info rejects bad input" {
     ret 0;
 }
 
-test "qoi: decode rejects short destination" {
+test qoi_decode__short_destination {
     var stream: [22]u8 = [22]u8{
         'q', 'o', 'i', 'f', 0, 0, 0, 1, 0, 0, 0, 1, 4, 0,
         0xFF, 10, 20, 30, 40, 0, 0, 0
@@ -406,7 +410,7 @@ test "qoi: decode rejects short destination" {
     ret 0;
 }
 
-test "qoi: decode rejects truncated stream" {
+test qoi_decode__truncated_stream {
     # header claims 2 pixels but only one RGBA chunk is present.
     var stream: [19]u8 = [19]u8{
         'q', 'o', 'i', 'f', 0, 0, 0, 2, 0, 0, 0, 1, 4, 0,
@@ -417,7 +421,9 @@ test "qoi: decode rejects truncated stream" {
 }
 
 # write a deterministic RGBA pattern that exercises every op:
-# runs of equal pixels, small diffs, luma steps, palette hits, and full colors
+# runs of equal pixels, small diffs, luma steps, palette hits, full colors,
+# and alpha changes
+#[testing]
 fun fill_pattern(buf: *u8, count: usize) {
     var i: usize = 0;
     for (i < count) {
@@ -426,6 +432,7 @@ fun fill_pattern(buf: *u8, count: usize) {
         buf[base + 1] = (i * 3)::u8;
         buf[base + 2] = (255 - i)::u8;
         buf[base + 3] = 255;
+        if (i % 8 == 7) { buf[base + 3] = (i * 5)::u8; }
         # every fourth pixel repeats the previous one to force runs.
         if (i % 4 == 0 && i > 0) {
             buf[base]     = buf[base - 4];
@@ -437,7 +444,7 @@ fun fill_pattern(buf: *u8, count: usize) {
     }
 }
 
-test "qoi: round-trip encode then decode" {
+test qoi_encode__round_trip {
     val w:     u32   = 16;
     val h:     u32   = 16;
     val count: usize = w::usize * h::usize;
@@ -448,7 +455,7 @@ test "qoi: round-trip encode then decode" {
     src.width      = w;
     src.height     = h;
     src.channels   = 4;
-    src.colorspace = 0;
+    src.colorspace = COLORSPACE_LINEAR;
 
     val enc: res[usize, EncodeError] = qoi_encode(?src, ?qoi_buf[0], 4096);
     if (!sel enc.ok) { ret 1; }
@@ -457,7 +464,8 @@ test "qoi: round-trip encode then decode" {
     val r: res[Image, DecodeError] = qoi_decode(?qoi_buf[0], n, ?rt_buf[0], 4096);
     if (!sel r.ok) { ret 1; }
     val img: Image = r.ok;
-    if (img.width != w || img.height != h) { ret 1; }
+    if (img.width != w || img.height != h)   { ret 1; }
+    if (img.colorspace != COLORSPACE_LINEAR) { ret 1; }
 
     var i: usize = 0;
     for (i < count * 4) {
@@ -467,7 +475,7 @@ test "qoi: round-trip encode then decode" {
     ret 0;
 }
 
-test "qoi: encode emits spec bytes for a run" {
+test qoi_encode__run_chunk {
     # a 2x1 image of the initial pixel (0,0,0,255) encodes to one RUN of 2.
     val count: usize = 2;
     var i:     usize = 0;
@@ -493,7 +501,7 @@ test "qoi: encode emits spec bytes for a run" {
     ret 0;
 }
 
-test "qoi: encode emits an rgb chunk for a fresh color" {
+test qoi_encode__rgb_chunk {
     # a 1x1 image whose only pixel differs widely from the initial pixel.
     pix_buf[0] = 10;
     pix_buf[1] = 20;
@@ -514,45 +522,7 @@ test "qoi: encode emits an rgb chunk for a fresh color" {
     ret 0;
 }
 
-test "qoi: round-trip with alpha variation" {
-    val w:     u32   = 8;
-    val h:     u32   = 8;
-    val count: usize = w::usize * h::usize;
-    var i:     usize = 0;
-    for (i < count) {
-        val base: usize = i * 4;
-        pix_buf[base]     = (i * 7)::u8;
-        pix_buf[base + 1] = (i * 11)::u8;
-        pix_buf[base + 2] = (i * 13)::u8;
-        pix_buf[base + 3] = (i * 5)::u8;
-        i                 = i + 1;
-    }
-
-    var src: Image;
-    src.pixels     = ?pix_buf[0];
-    src.width      = w;
-    src.height     = h;
-    src.channels   = 4;
-    src.colorspace = 1;
-
-    val enc: res[usize, EncodeError] = qoi_encode(?src, ?qoi_buf[0], 4096);
-    if (!sel enc.ok) { ret 1; }
-    val n: usize = enc.ok;
-
-    val r: res[Image, DecodeError] = qoi_decode(?qoi_buf[0], n, ?rt_buf[0], 4096);
-    if (!sel r.ok) { ret 1; }
-    val img: Image = r.ok;
-    if (img.colorspace != 1) { ret 1; }
-
-    i = 0;
-    for (i < count * 4) {
-        if (rt_buf[i] != pix_buf[i]) { ret 1; }
-        i = i + 1;
-    }
-    ret 0;
-}
-
-test "qoi: encode refuses invalid images and short buffers" {
+test qoi_encode__refusals {
     pix_buf[0] = 1;
     pix_buf[1] = 2;
     pix_buf[2] = 3;
