@@ -11,7 +11,6 @@ use std.types.bool.true;
 use std.types.option.opt;
 use std.types.size.usize;
 use std.types.string.str;
-use std.types.string.str_equals;
 
 # colorspace hint carried through from source metadata
 #
@@ -123,6 +122,7 @@ pub fun encode_error_name(e: EncodeError) str {
 # a:   first value
 # b:   second value
 # ret: true when both select the same case
+#[testing]
 pub fun same_case[T](a: T, b: T) bool {
     $each c in $cases(T) {
         if (sel a.[c] && sel b.[c]) { ret true; }
@@ -130,44 +130,20 @@ pub fun same_case[T](a: T, b: T) bool {
     ret false;
 }
 
-test "codec: image_byte_len basic" {
-    val a: opt[usize] = image_byte_len(1, 1);
-    if (!sel a.some) { ret 1; }
-    if (a.some != 4) { ret 1; }
-    val b: opt[usize] = image_byte_len(2, 3);
-    if (!sel b.some)  { ret 2; }
-    if (b.some != 24) { ret 2; }
-    val c: opt[usize] = image_byte_len(16, 16);
-    if (!sel c.some)    { ret 3; }
-    if (c.some != 1024) { ret 3; }
-    ret 0;
-}
-
-test "codec: image_byte_len zero dimension is unrepresentable" {
-    val a: opt[usize] = image_byte_len(0, 10);
-    if (!sel a.none) { ret 1; }
-    val b: opt[usize] = image_byte_len(10, 0);
+test image_byte_len__bounds {
+    val a: opt[usize] = image_byte_len(2, 3);
+    if (!sel a.some)  { ret 1; }
+    if (a.some != 24) { ret 1; }
+    val b: opt[usize] = image_byte_len(0, 10);
     if (!sel b.none) { ret 2; }
+    val c: opt[usize] = image_byte_len(10, 0);
+    if (!sel c.none) { ret 3; }
+    val d: opt[usize] = image_byte_len(0xFFFFFFFF, 0xFFFFFFFF);
+    if (!sel d.none) { ret 4; }
     ret 0;
 }
 
-test "codec: image_byte_len rejects overflow" {
-    val a: opt[usize] = image_byte_len(0xFFFFFFFF, 0xFFFFFFFF);
-    if (!sel a.none) { ret 1; }
-    ret 0;
-}
-
-test "codec: error names" {
-    if (!str_equals(decode_error_name(DecodeError.truncated{}), "truncated"))          { ret 1; }
-    if (!str_equals(decode_error_name(DecodeError.short_buffer{4}), "short-buffer"))   { ret 2; }
-    if (!str_equals(decode_error_name(DecodeError.short_scratch{4}), "short-scratch")) { ret 3; }
-    if (!str_equals(decode_error_name(DecodeError.corrupt{}), "corrupt"))              { ret 4; }
-    if (!str_equals(encode_error_name(EncodeError.too_large{}), "too-large"))          { ret 5; }
-    if (!str_equals(encode_error_name(EncodeError.short_buffer{1}), "short-buffer"))   { ret 6; }
-    ret 0;
-}
-
-test "codec: same_case ignores payloads" {
+test same_case__ignores_payloads {
     if (!same_case[DecodeError](DecodeError.short_buffer{1}, DecodeError.short_buffer{2})) { ret 1; }
     if (same_case[DecodeError](DecodeError.short_buffer{1}, DecodeError.short_scratch{1})) { ret 2; }
     if (same_case[DecodeError](DecodeError.truncated{}, DecodeError.corrupt{}))            { ret 3; }

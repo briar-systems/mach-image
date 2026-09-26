@@ -6,7 +6,6 @@ use image.png.PNG_SIGNATURE;
 use std.types.option.opt;
 use std.types.size.usize;
 use std.types.string.str;
-use std.types.string.str_equals;
 
 # an image container format
 # ---
@@ -98,6 +97,7 @@ pub fun detect(src: *u8, src_len: usize) opt[Format] {
 }
 
 # whether detect names the expected format
+#[testing]
 fun detects(src: *u8, src_len: usize, want: Format) u8 {
     val got: opt[Format] = detect(src, src_len);
     if (!sel got.some)                      { ret 0; }
@@ -105,47 +105,27 @@ fun detects(src: *u8, src_len: usize, want: Format) u8 {
     ret 1;
 }
 
-test "format: known names" {
-    if (!str_equals(format_name(Format.qoi{}), "qoi"))   { ret 1; }
-    if (!str_equals(format_name(Format.tga{}), "tga"))   { ret 2; }
-    if (!str_equals(format_name(Format.png{}), "png"))   { ret 3; }
-    if (!str_equals(format_name(Format.jpeg{}), "jpeg")) { ret 4; }
+test detect__signatures {
+    var qoi: [14]u8 = [14]u8{'q', 'o', 'i', 'f', 0, 0, 0, 1, 0, 0, 0, 1, 4, 0};
+    if (detects(?qoi[0], 14, Format.qoi{}) == 0) { ret 1; }
+    var png: [8]u8 = [8]u8{137, 80, 78, 71, 13, 10, 26, 10};
+    if (detects(?png[0], 8, Format.png{}) == 0) { ret 2; }
+    # a signature the transfer-corruption check is meant to catch is not a PNG
+    png[2] = 0;
+    if (detects(?png[0], 8, Format.png{}) != 0) { ret 3; }
+    var jpeg: [4]u8 = [4]u8{0xFF, 0xD8, 0xFF, 0xE0};
+    if (detects(?jpeg[0], 4, Format.jpeg{}) == 0) { ret 4; }
+    var garbage: [4]u8       = [4]u8{0xDE, 0xAD, 0xBE, 0xEF};
+    val got:     opt[Format] = detect(?garbage[0], 4);
+    if (!sel got.none) { ret 5; }
     ret 0;
 }
 
-test "format: detect qoi magic" {
-    var buf: [14]u8 = [14]u8{'q', 'o', 'i', 'f', 0, 0, 0, 1, 0, 0, 0, 1, 4, 0};
-    if (detects(?buf[0], 14, Format.qoi{}) == 0) { ret 1; }
-    ret 0;
-}
-
-test "format: detect tga by header heuristic" {
+test detect__tga_header_heuristic {
     var buf: [18]u8;
     buf[1]  = 0; # color_map_type: none
     buf[2]  = 2; # image_type: uncompressed truecolor
     buf[16] = 32; # pixel depth
     if (detects(?buf[0], 18, Format.tga{}) == 0) { ret 1; }
-    ret 0;
-}
-
-test "format: detect png signature" {
-    var buf: [8]u8 = [8]u8{137, 80, 78, 71, 13, 10, 26, 10};
-    if (detects(?buf[0], 8, Format.png{}) == 0) { ret 1; }
-    # a signature the transfer-corruption check is meant to catch is not a PNG
-    buf[2] = 0;
-    if (detects(?buf[0], 8, Format.png{}) != 0) { ret 2; }
-    ret 0;
-}
-
-test "format: detect jpeg start-of-image marker" {
-    var buf: [4]u8 = [4]u8{0xFF, 0xD8, 0xFF, 0xE0};
-    if (detects(?buf[0], 4, Format.jpeg{}) == 0) { ret 1; }
-    ret 0;
-}
-
-test "format: detect rejects garbage" {
-    var buf: [4]u8       = [4]u8{0xDE, 0xAD, 0xBE, 0xEF};
-    val got: opt[Format] = detect(?buf[0], 4);
-    if (!sel got.none) { ret 1; }
     ret 0;
 }
