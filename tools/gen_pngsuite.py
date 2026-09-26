@@ -419,50 +419,6 @@ def verify(path: str, verdict: Verdict, mine: bytes) -> None:
                 )
 
 
-CATEGORIES = [
-    ("basic", "pngsuite: basic formats"),
-    ("interlaced", "pngsuite: interlaced formats"),
-    ("filter", "pngsuite: scanline filters"),
-    ("odd-size", "pngsuite: odd sizes"),
-    ("transparency", "pngsuite: transparency"),
-    ("gamma", "pngsuite: gamma"),
-    ("order", "pngsuite: chunk order and compression"),
-    ("ancillary", "pngsuite: ancillary chunks"),
-    ("corrupt", "pngsuite: corrupt files"),
-]
-
-
-def category(stem: str) -> str:
-    """which generated test a file's cases belong to, by its PngSuite prefix.
-
-    prefixes follow the naming convention documented on the PngSuite page
-    (http://www.schaik.com/pngsuite/pngsuite.html#basic): colortype+bitdepth
-    suffix, category-specific prefix, i/n for interlaced/non-interlaced.
-    """
-    if stem == "PngSuite":
-        return "ancillary"          # the suite's own logo image
-    if stem.startswith("x"):
-        return "corrupt"
-    if stem.startswith("basi"):
-        return "interlaced"
-    if stem.startswith("basn"):
-        return "basic"
-    if stem[:2] in ("bg", "cd", "ch", "cm", "cs", "ct") or stem.startswith("exif") \
-            or stem.startswith("ccw") or stem[:2] in ("pp", "ps"):
-        return "ancillary"          # bKGD/pHYs/cHRM/hIST/tIME/tEXt/sBIT/eXIf/PLTE/sPLT
-    if stem[:2] in ("f0", "f9"):
-        return "filter"
-    if stem[:2] in ("s0", "s3", "s4"):
-        return "odd-size"
-    if stem[:2] in ("tb", "tm", "tp"):
-        return "transparency"
-    if stem[:1] == "g" and stem[1:2] in ("0", "1", "2"):
-        return "gamma"
-    if stem.startswith("oi") or stem.startswith("z0"):
-        return "order"
-    raise ValueError("no category rule for %r" % stem)
-
-
 def mach_name(filename: str) -> str:
     stem = filename.lower().replace(".", "_").replace("-", "_")
     return stem
@@ -512,43 +468,33 @@ def build(corpus_dir: str) -> str:
         verify(path, verdict, pixels)
         decodable.append((name, data, verdict, fnv1a64(pixels)))
 
-    buckets = {key: [] for key, _ in CATEGORIES}
-    for filename, stem, name, data, verdict in entries:
-        buckets[category(stem)].append((filename, stem, name, data, verdict))
+    refused = [(name, data, verdict) for _, _, name, data, verdict in entries if verdict.status != "ok"]
 
     out = []
     out.append(HEADER.strip("\n"))
     out.append("")
     out.append(IMPORTS.strip("\n"))
     out.append("")
-    out.append(EXPECT_INFO.strip("\n"))
+    out.append(HELPERS.strip("\n"))
 
     for filename, stem, name, data, verdict in entries:
         out.append("")
+        out.append("#[testing]")
         out.append(emit_array(name, data))
 
-    for key, title in CATEGORIES:
-        cases = buckets[key]
-        out.append("")
-        out.append('test "%s" {' % title)
-        for i, (filename, stem, name, data, verdict) in enumerate(cases, start=1):
-            w, h, ch = verdict.width, verdict.height, verdict.channels
-            if verdict.status == "ok":
-                out.append(
-                    "    if (expect_info(?%s[0], %d, %d, %d, %d) == 0) { ret %d; }"
-                    % (name, len(data), w, h, ch, i)
-                )
-            else:
-                out.append(
-                    "    if (expect_refusal(?%s[0], %d, DecodeError.%s{}) == 0) { ret %d; }"
-                    % (name, len(data), verdict.status, i)
-                )
-        out.append("    ret 0;")
-        out.append("}")
+    out.append("")
+    out.append("test pngsuite__corrupt_files_refused {")
+    for i, (name, data, verdict) in enumerate(refused, start=1):
+        out.append(
+            "    if (expect_refusal(?%s[0], %d, DecodeError.%s{}) == 0) { ret %d; }"
+            % (name, len(data), verdict.status, i)
+        )
+    out.append("    ret 0;")
+    out.append("}")
 
     if corrupt_rasters:
         out.append("")
-        out.append('test "pngsuite: corrupt image data is rejected" {')
+        out.append("test pngsuite__corrupt_image_data_refused {")
         for i, (name, data) in enumerate(corrupt_rasters, start=1):
             out.append(
                 "    if (expect_corrupt(?%s[0], %d) == 0) { ret %d; }"
@@ -562,6 +508,7 @@ def build(corpus_dir: str) -> str:
         "# FNV-1a 64 over the expected RGBA8 output of every file above this decoder\n"
         "# is expected to decode successfully, in the same order as pngsuite_decodable."
     )
+    out.append("#[testing]")
     out.append(
         "var pngsuite_hashes: [%d]u64 = [%d]u64{\n%s\n};"
         % (len(decodable), len(decodable), wrap_values([h for _, _, _, h in decodable]))
@@ -569,26 +516,29 @@ def build(corpus_dir: str) -> str:
 
     out.append("")
     out.append(
-        "# the pointer, length, and dimensions of the i-th entry backing\n"
-        "# pngsuite_hashes, or nil past the end\n"
+        "# the pointer, length, geometry, and channel count of the i-th entry\n"
+        "# backing pngsuite_hashes, or nil past the end\n"
         "# ---\n"
-        "# i:      index into pngsuite_hashes, 0-based\n"
+        "# i:       index into pngsuite_hashes, 0-based\n"
         "# out_len: set to the entry's byte length\n"
         "# out_w:   set to the entry's expected width\n"
         "# out_h:   set to the entry's expected height\n"
+        "# out_ch:  set to the entry's expected channel count\n"
         "# ret:     pointer to the entry's encoded bytes, or nil if i is out of range"
     )
-    out.append("pub fun pngsuite_decodable(i: usize, out_len: *usize, out_w: *u32, out_h: *u32) *u8 {")
+    out.append("#[testing]")
+    out.append("fun pngsuite_decodable(i: usize, out_len: *usize, out_w: *u32, out_h: *u32, out_ch: *u8) *u8 {")
     for i, (name, data, verdict, h) in enumerate(decodable):
         out.append(
-            "    if (i == %d) { out_len[0] = %d; out_w[0] = %d; out_h[0] = %d; ret ?%s[0]; }"
-            % (i, len(data), verdict.width, verdict.height, name)
+            "    if (i == %d) { out_len[0] = %d; out_w[0] = %d; out_h[0] = %d; out_ch[0] = %d; ret ?%s[0]; }"
+            % (i, len(data), verdict.width, verdict.height, verdict.channels, name)
         )
     out.append("    out_len[0] = 0;")
     out.append("    ret nil;")
     out.append("}")
     out.append("")
-    out.append("pub val PNGSUITE_DECODABLE_COUNT: usize = %d;" % len(decodable))
+    out.append("#[testing]")
+    out.append("val PNGSUITE_DECODABLE_COUNT: usize = %d;" % len(decodable))
     out.append("")
     out.append(DECODE_TEST.strip("\n"))
     out.append("")
@@ -623,8 +573,8 @@ HEADER = '''
 # byte (truncation, matching this decoder's documented rule), computed by
 # hand rather than trusted from Pillow's own bit-depth conversion. no bKGD
 # background is composited, so alpha is preserved as decoded.
-# pngsuite_decodable hands the decode test below the pointer, length, and
-# dimensions for the i-th entry.
+# pngsuite_decodable hands the decode test below the pointer, length,
+# dimensions, and channel count for the i-th entry.
 '''
 
 IMPORTS = '''
@@ -641,16 +591,9 @@ use image.codec.image_byte_len;
 use fnv: std.crypto.hash.fnv1a;
 '''
 
-EXPECT_INFO = '''
-# 1 when png_info accepts the file with the expected geometry
-fun expect_info(data: *u8, len: usize, w: u32, h: u32, ch: u8) u8 {
-    val r: res[Image, DecodeError] = png_info(data, len);
-    if (!sel r.ok) { ret 0; }
-    if (r.ok.width != w || r.ok.height != h || r.ok.channels != ch) { ret 0; }
-    ret 1;
-}
-
+HELPERS = '''
 # 1 when png_info refuses the file with the case want names
+#[testing]
 fun expect_refusal(data: *u8, len: usize, want: DecodeError) u8 {
     val r: res[Image, DecodeError] = png_info(data, len);
     if (!sel r.err) { ret 0; }
@@ -659,6 +602,7 @@ fun expect_refusal(data: *u8, len: usize, want: DecodeError) u8 {
 }
 
 # 1 when png_decode refuses the file as corrupt
+#[testing]
 fun expect_corrupt(data: *u8, len: usize) u8 {
     val r: res[Image, DecodeError] = png_decode(data, len, ?suite_pix[0], 262144, ?suite_scratch[0], 262144);
     if (!sel r.err) { ret 0; }
@@ -670,16 +614,19 @@ fun expect_corrupt(data: *u8, len: usize) u8 {
 DECODE_TEST = '''
 # 256x256 RGB8 is the corpus's largest image: 262144 output bytes over a
 # 196865-byte raster plus the inflate window.
+#[testing]
 var suite_pix:     [262144]u8;
+#[testing]
 var suite_scratch: [262144]u8;
 
-test "pngsuite: every supported image decodes to its expected pixels" {
+test pngsuite__decodes_expected_pixels {
     var i: usize = 0;
     for (i < PNGSUITE_DECODABLE_COUNT) {
         var len: usize = 0;
         var w:   u32 = 0;
         var h:   u32 = 0;
-        val data: *u8 = pngsuite_decodable(i, ?len, ?w, ?h);
+        var ch:  u8 = 0;
+        val data: *u8 = pngsuite_decodable(i, ?len, ?w, ?h, ?ch);
         if (data == nil) { ret (i + 1)::i32; }
 
         val scratch_need: res[usize, DecodeError] = png_scratch_len(data, len);
@@ -688,7 +635,7 @@ test "pngsuite: every supported image decodes to its expected pixels" {
 
         val r: res[Image, DecodeError] = png_decode(data, len, ?suite_pix[0], 262144, ?suite_scratch[0], 262144);
         if (!sel r.ok) { ret (i + 1)::i32; }
-        if (r.ok.width != w || r.ok.height != h) { ret (i + 1)::i32; }
+        if (r.ok.width != w || r.ok.height != h || r.ok.channels != ch) { ret (i + 1)::i32; }
 
         var hash: u64 = fnv.FNV_INIT;
         var b:    usize = 0;

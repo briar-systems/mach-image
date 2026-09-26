@@ -13,7 +13,7 @@ use std.types.string.str;
 use std.runtime;
 
 # the mach-image release this source corresponds to
-pub val VERSION: str = "0.7.1";
+pub val VERSION: str = "0.8.0";
 
 fwd format.Format;
 fwd format.format_name;
