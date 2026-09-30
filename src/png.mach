@@ -29,7 +29,6 @@ use adler: std.crypto.hash.adler32;
 use crc:   std.crypto.hash.crc32;
 use std.memory.raw_copy;
 use std.memory.raw_equal;
-use std.types.bool.bool;
 use std.types.error.err;
 use std.types.option.opt;
 use std.types.result.res;
