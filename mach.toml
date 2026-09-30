@@ -45,7 +45,7 @@ simd = "scalarize"
 vectorize = false
 float_reassoc = false
 
-# the library, and the only artifact `mach build .` and `--all-targets` select
+# the library, and the only artifact a bare `mach build .` selects
 [artifact.image]
 kind    = "static"
 entry   = "lib/image.mach"
@@ -55,7 +55,7 @@ link    = []
 need    = []
 default = true
 
-# test-only: reaches the modules whose tests the library does not, for `mach test . --lib tests`
+# test-only: reaches the modules whose tests the library does not, for `mach test . -a tests`
 [artifact.tests]
 kind    = "static"
 entry   = "lib/tests.mach"

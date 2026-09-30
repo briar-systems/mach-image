@@ -3,7 +3,7 @@
 #
 # mach tests one artifact's closure (mach#3813), so a module no artifact
 # reaches has its tests dropped without a word. this fails on any declared test
-# that neither `mach test .` nor `mach test . --lib tests` collects.
+# that neither `mach test .` nor `mach test . -a tests` collects.
 set -euo pipefail
 
 mach="${1:-mach}"
@@ -34,7 +34,7 @@ list() {
 missing=0
 for target in $targets; do
     list "$scratch/$target-image.txt" --target "$target"
-    list "$scratch/$target-tests.txt" --lib tests --target "$target"
+    list "$scratch/$target-tests.txt" -a tests --target "$target"
     cat "$scratch/$target-image.txt" "$scratch/$target-tests.txt" | awk '{print $1}' | sort -u > "$scratch/$target-union.txt"
     dropped="$(comm -23 "$scratch/declared.txt" "$scratch/$target-union.txt")"
     printf '%s: image %d, tests %d, both %d of %d declared\n' "$target" \
@@ -48,4 +48,4 @@ for target in $targets; do
 done
 
 [ "$missing" = 0 ] || exit 1
-echo "OK: every test declared under src runs under mach test . or mach test . --lib tests, on every target"
+echo "OK: every test declared under src runs under mach test . or mach test . -a tests, on every target"
