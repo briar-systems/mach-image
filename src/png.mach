@@ -1043,17 +1043,17 @@ pub fun png_encode(img: *Image, dst: *u8, dst_len: usize) res[usize, EncodeError
 }
 
 #[testing]
-var png_raw: [256]u8;
+var png_raw:       [256]u8;
 #[testing]
-var png_pix: [256]u8;
+var png_pix:       [256]u8;
 #[testing]
-var png_work: [33280]u8; # inflate window plus a small raster
+var png_work:      [33280]u8; # inflate window plus a small raster
 #[testing]
-var png_enc: [4096]u8;
+var png_enc:       [4096]u8;
 #[testing]
-var png_enc_src: [256]u8;
+var png_enc_src:   [256]u8;
 #[testing]
-var png_enc_rt: [256]u8;
+var png_enc_rt:    [256]u8;
 #[testing]
 var png_block_src: [65536]u8;
 #[testing]

@@ -7574,7 +7574,7 @@ val PNGSUITE_DECODABLE_COUNT: usize = 162;
 # 256x256 RGB8 is the corpus's largest image: 262144 output bytes over a
 # 196865-byte raster plus the inflate window.
 #[testing]
-var suite_pix: [262144]u8;
+var suite_pix:     [262144]u8;
 #[testing]
 var suite_scratch: [262144]u8;
 
