@@ -2,12 +2,13 @@
 
 Pure-mach image decoding and encoding for the engine and its tooling. No C, no
 bindings, no system image libraries, just the codecs implemented directly in
-Mach. Project id is `image`, so consumers reach everything as `image.*`.
+Mach. Project id is `image`, and `use image.lib.image;` binds the whole API as
+`image.*`.
 
 ```mach
 use std.types.result.res;
 use std.types.size.usize;
-use image;
+use image.lib.image;
 
 fun width_of(src: *u8, len: usize) u32 {
     val info: res[image.Image, image.DecodeError] = image.png_info(src, len);
@@ -49,7 +50,7 @@ approximate pixels, so an unsupported configuration is always a
   - **TGA**: next: uncompressed and RLE variants, still no external
     dependencies.
   - **PNG**: third: every valid bit depth across every color type, backed by
-    mach-std's DEFLATE implementation and the PngSuite corpus.
+    the mach-deflate package's DEFLATE implementation and the PngSuite corpus.
   - **JPEG**: later, once the lossless formats are solid.
 - Encoders for at least **QOI** and **PNG**, sized for tooling use
   (screenshots, generated assets) rather than exhaustive option coverage.
@@ -100,7 +101,9 @@ and rejected cleanly, never trusted.
 
 Each codec lands as its own module (`qoi.mach`, `tga.mach`, ...) exposing its
 decode/encode entry points and buffer-sizing helpers, re-exported through
-`lib/image.mach` so a bare `use image;` reaches the whole API under one namespace.
+`lib/image.mach`, which a consumer imports by its source path,
+`use image.lib.image;`, to reach the whole API under one namespace. A consumer
+can also import one codec module directly, as `use image.png;`.
 
 The PNG writer sizes caller-owned storage with
 `png_encode_bound(width, height)` and writes with
