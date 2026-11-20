@@ -14,6 +14,10 @@
 # emits one deterministic subset: noninterlaced RGBA8 scanlines with filter 0 in
 # a zlib stream made of stored DEFLATE blocks, without allocating.
 
+use adler: deflate.adler32;
+use crc:   deflate.crc32;
+use Z:     deflate.inflate;
+use ZL:    deflate.zlib;
 use image.codec.COLORSPACE_LINEAR;
 use image.codec.COLORSPACE_SRGB;
 use image.codec.DecodeError;
@@ -21,12 +25,8 @@ use image.codec.EncodeError;
 use image.codec.Image;
 use image.codec.image_byte_len;
 use image.codec.same_case;
-use A:     std.allocator;
-use FIX:   std.allocator.fixed;
-use Z:     std.compress.inflate;
-use ZL:    std.compress.zlib;
-use adler: std.crypto.hash.adler32;
-use crc:   std.crypto.hash.crc32;
+use A:   std.allocator;
+use FIX: std.allocator.fixed;
 use std.memory.raw_copy;
 use std.memory.raw_equal;
 use std.types.error.err;
@@ -142,7 +142,7 @@ rec PngHeader {
 # ---
 # plte_off/plte_entries: palette offset and entry count
 # trns_off/trns_len:     transparency offset and payload length in bytes
-# idat_total: summed IDAT payload bytes, the zlib stream's length
+# idat_total:            summed IDAT payload bytes, the zlib stream's length
 rec PngScan {
     plte_off:     usize;
     plte_entries: usize;
@@ -1004,7 +1004,7 @@ pub fun png_encode(img: *Image, dst: *u8, dst_len: usize) res[usize, EncodeError
     var row_pos:   usize = 0;
     var pixel_pos: usize = 0;
     var remaining: usize = raw_len;
-    var checksum:  u32   = adler.init();
+    var checksum:  u32   = adler.make();
 
     for (remaining > 0) {
         val block_len: usize = write_stored_header(dst, p, remaining);
@@ -1594,7 +1594,7 @@ test png_encode__splits_stored_blocks {
     if (png_block_enc[65588] != png_block_src[65534]
         || png_block_enc[65589] != png_block_src[65535]) { ret 6; }
 
-    var sum: u32 = adler.init();
+    var sum: u32 = adler.make();
     sum = adler.update(sum, ?png_block_enc[48], 65535);
     sum = adler.update(sum, ?png_block_enc[65588], 2);
     if (read_be32(?png_block_enc[0], 65590) != sum)                                 { ret 7; }

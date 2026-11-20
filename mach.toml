@@ -1,69 +1,70 @@
 [project]
 id      = "image"
 version = "0.8.0"
-mach    = "^6"
+mach    = "^7"
 src     = "src"
-out     = "out/{target.name}/{profile.name}"
+work    = "out/{target.name}/{profile.name}"
 
 [target.linux-x86_64]
-isa = "x86_64"
-os  = "linux"
-abi = "sysv64"
+arch = "x86_64"
+sys  = "linux"
+abi  = "sysv64"
 
 [target.windows-x86_64]
-isa = "x86_64"
-os  = "windows"
-abi = "win64"
+arch = "x86_64"
+sys  = "windows"
+abi  = "win64"
 
 [target.darwin-x86_64]
-isa = "x86_64"
-os  = "darwin"
-abi = "sysv64"
+arch = "x86_64"
+sys  = "darwin"
+abi  = "sysv64"
 
 [target.linux-arm64]
-isa = "aarch64"
-os  = "linux"
-abi = "aapcs64"
+arch = "aarch64"
+sys  = "linux"
+abi  = "aapcs64"
 
 [target.darwin-aarch64]
-isa = "aarch64"
-os  = "darwin"
-abi = "aapcs64"
+arch = "aarch64"
+sys  = "darwin"
+abi  = "darwinpcs"
 
 [profile.debug]
-default = true
-opt   = 0
-debug = true
-simd = "scalarize"
-vectorize = false
-float_reassoc = false
+default  = true
+optimize = false
+debug    = true
+simd     = "scalarize"
 
 [profile.release]
-opt   = 2
-debug = false
-simd = "scalarize"
-vectorize = false
-float_reassoc = false
+optimize = true
+debug    = false
+simd     = "scalarize"
 
 # the library, and the only artifact a bare `mach build .` selects
 [artifact.image]
 kind    = "static"
 entry   = "lib/image.mach"
-out     = "lib/image"
+out     = "{project.work}/lib/libimage{artifact.suffix}"
 targets = ["*"]
 link    = []
 need    = []
 default = true
+export  = true
 
 # test-only: reaches the modules whose tests the library does not, for `mach test . -a tests`
 [artifact.tests]
 kind    = "static"
 entry   = "lib/tests.mach"
-out     = "lib/tests"
+out     = "{project.work}/lib/libtests{artifact.suffix}"
 targets = ["*"]
 link    = []
 need    = []
 
 [dep.std]
 git = "https://github.com/briar-systems/mach-std"
-version = "^9.0"
+ref = "branch/dev"
+
+[dep.deflate]
+git = "https://github.com/briar-systems/mach-deflate"
+ref = "branch/dev"
